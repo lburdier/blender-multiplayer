@@ -29,6 +29,8 @@ try:
     # Reglages de rendu propres au client, avant de rejoindre
     my_engine = eevee()
     bpy.context.scene.cycles.samples = 33
+    bpy.context.scene.cycles.device = "GPU"          # propre a ce PC
+    bpy.context.scene.cycles.preview_samples = 7     # qualite de la vue 3D : propre a ce PC
     s = None
     for _ in range(40):
         try:
@@ -53,8 +55,11 @@ try:
     peinte = bpy.data.images.get("Peinte")
     T.check("texture peinte non enregistree recue", peinte is not None and px(peinte) == [0.0, 1.0, 0.0, 1.0],
             px(peinte) if peinte else None)
-    T.check("moteur de rendu du client conserve", sc.render.engine == my_engine, sc.render.engine)
-    T.check("echantillons du client conserves", sc.cycles.samples == 33, sc.cycles.samples)
+    T.check("moteur de rendu de l'hote recu", sc.render.engine == "CYCLES", sc.render.engine)
+    T.check("echantillons de l'hote recus", sc.cycles.samples == 77, sc.cycles.samples)
+    T.check("peripherique du client conserve", sc.cycles.device == "GPU", sc.cycles.device)
+    T.check("echantillons de la vue 3D du client conserves", sc.cycles.preview_samples == 7,
+            sc.cycles.preview_samples)
     T.check("resolution de sortie partagee", sc.render.resolution_x == 1111, sc.render.resolution_x)
     T.say("CLIENT_READY")
 
@@ -81,8 +86,10 @@ try:
         L = bpy.data.objects["Lampe"].data
         T.check("lumiere : noeuds", L.node_tree.nodes.get("CorpsNoir") is not None,
                 [n.name for n in L.node_tree.nodes])
-    T.check("moteur de l'hote non impose", sc.render.engine == my_engine, sc.render.engine)
-    T.check("echantillons de l'hote non imposes", sc.cycles.samples == 33, sc.cycles.samples)
+    T.check("changement de moteur de l'hote recu", sc.render.engine == "BLENDER_WORKBENCH", sc.render.engine)
+    T.check("changement d'echantillons de l'hote recu", sc.cycles.samples == 99, sc.cycles.samples)
+    T.check("peripherique du client toujours conserve", sc.cycles.device == "GPU", sc.cycles.device)
+    T.check("vue 3D du client toujours conservee", sc.cycles.preview_samples == 7, sc.cycles.preview_samples)
     T.check("resolution mise a jour", sc.render.resolution_x == 1234, sc.render.resolution_x)
     T.say("C1")
 

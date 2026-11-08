@@ -61,10 +61,10 @@ Le lien est **privé** : il contient l'adresse de la session et son mot de passe
   - un fichier de texture **modifié sur le disque** (retouché dans Photoshop, Substance…) est détecté, rechargé et renvoyé à tous automatiquement ;
   - la **peinture de texture** dans Blender est diffusée pendant que l'on peint, même sans enregistrer l'image (dans les deux sens).
 - Matériaux, arbres de nodes, mondes, animations (actions 5.x à slots), armatures (os ajoutés en mode Édition), courbes, textes, Grease Pencil, lattices, metaballs, volumes, cheveux, nuages de points… : envoyés en « blob » (data-block complet), donc fidèles à 100 %.
-- **Lumières** : tous les paramètres (couleur, puissance, rayon, cône, température, exposition, réglages Cycles…) et leurs **nodes** ; caméras (dont la mise au point) ; collections ; scènes (réglages de sortie : résolution, images/s, fichier ; unités ; gestion des couleurs ; exclusion de calques).
+- **Lumières** : tous les paramètres (couleur, puissance, rayon, cône, température, exposition, réglages Cycles…) et leurs **nodes** ; caméras (dont la mise au point) ; collections ; scènes (**réglages de rendu** : moteur, Cycles, EEVEE, Workbench, débruitage ; réglages de sortie : résolution, images/s, fichier ; unités ; gestion des couleurs ; exclusion de calques). L'invité voit la même image que l'hôte, dans la vue Rendu comme au F12.
 
 Restent **propres à chaque joueur** :
-- les **réglages de rendu** : moteur, échantillons, périphérique (GPU/CPU), débruiteur, performances, réglages Cycles/EEVEE/Workbench. Chacun garde les siens, adaptés à son PC, même en rejoignant une session ;
+- les réglages liés au **matériel** : périphérique de calcul (GPU/CPU), threads, tuiles, limite de taille des textures, et le nombre d'échantillons de la vue 3D. Chacun garde les siens, adaptés à son PC, même en rejoignant une session ;
 - la sélection, le point de vue, le mode, la frame courante (partageable par l'hôte avec *Frame partagée*) et les réglages d'outils.
 
 ## Voir les autres
@@ -127,7 +127,7 @@ MP_TEST_ONLINE=1 python tests/run_integration.py "<hôte>" "<client>" 57125     
 python tests/run_update_test.py "<blender>" dist/blender_multiplayer-x.y.z.zip  # mise à jour automatique (zip et dépôt distant)
 ```
 
-Le scénario 1 couvre la création et la suppression à distance, les matériaux, le Ctrl+Z partagé, les modifications simultanées, le verrou en mode Édition avec la géométrie en direct, les modificateurs, les collections, les parents, le retour à un point et son annulation, les sauvegardes. Le scénario 2 couvre les lumières, les caméras, l'animation, Geometry Nodes, les images, les courbes, l'armature (pose et os), le texte, Maj+D, les conflits de noms simultanés et l'absence d'opération quand on change de frame. Le scénario 3 couvre les textures (fichiers externes, tuiles UDIM, fichier modifié sur le disque, peinture dans les deux sens), tous les paramètres et nodes des lumières, l'indépendance des réglages de rendu, le glissement des objets sans écho et l'expiration de l'historique avec archive.
+Le scénario 1 couvre la création et la suppression à distance, les matériaux, le Ctrl+Z partagé, les modifications simultanées, le verrou en mode Édition avec la géométrie en direct, les modificateurs, les collections, les parents, le retour à un point et son annulation, les sauvegardes. Le scénario 2 couvre les lumières, les caméras, l'animation, Geometry Nodes, les images, les courbes, l'armature (pose et os), le texte, Maj+D, les conflits de noms simultanés et l'absence d'opération quand on change de frame. Le scénario 3 couvre les textures (fichiers externes, tuiles UDIM, fichier modifié sur le disque, peinture dans les deux sens), tous les paramètres et nodes des lumières, le partage des réglages de rendu (le périphérique et la vue 3D restant propres à chacun), le glissement des objets sans écho et l'expiration de l'historique avec archive.
 
 ## Publier une nouvelle version
 

@@ -1034,10 +1034,10 @@ SCENE_SKIP = frozenset((
     "safe_areas", "display", "shading", "grease_pencil_settings", "hydra",
 ))
 
-# Reglages de RENDU : propres a chaque joueur (moteur, echantillons, peripherique,
-# debruiteur, performances...) car ils dependent du PC. Seuls les reglages de
-# SORTIE (resolution, images/s, fichier de sortie...), les unites et la gestion
-# des couleurs (le "look" du projet) sont partages.
+# Reglages de rendu PARTAGES : moteur, reglages Cycles / EEVEE / Workbench, sortie,
+# unites, gestion des couleurs : tout le monde voit la meme image que l'hote.
+# Seuls restent propres a chaque PC le peripherique (GPU/CPU), les performances
+# et la qualite de la vue 3D (LOCAL_RENDER_KEYS).
 _SCENE_SUBS = (
     ("_unit", "unit_settings", 0, ()),
     ("_view", "view_settings", 0, ()),
@@ -1050,7 +1050,72 @@ OUTPUT_PREFIXES = ("resolution_", "pixel_aspect", "fps", "frame_map", "filepath"
                    "use_multiview", "views_format", "use_single_layer")
 
 # Reglages de rendu restaures chez le joueur apres reception de la scene de l'hote.
-LOCAL_RENDER_SUBS = ("cycles", "eevee", "display", "hydra")
+# Sous-reglages de rendu partages : (cle du message, attribut de la scene)
+RENDER_SUBS = (("_rnd", "render"), ("_cyc", "cycles"), ("_eev", "eevee"), ("_wb", "display"))
+# Propres a chaque PC : materiel, performances, qualite de la vue 3D.
+LOCAL_RENDER_KEYS = {
+    "render": frozenset(("threads_mode", "threads", "use_persistent_data", "preview_pixel_size",
+                         "use_lock_interface", "compositor_device", "compositor_precision")),
+    "cycles": frozenset(("device", "denoising_use_gpu", "preview_denoising_use_gpu", "preview_samples",
+                         "use_auto_tile", "tile_size", "shading_system",
+                         "texture_limit", "texture_limit_render", "debug_use_spatial_splits",
+                         "debug_use_hair_bvh", "debug_bvh_type", "debug_use_compact_bvh",
+                         "debug_bvh_time_steps")),
+    "eevee": frozenset(("taa_samples", "use_taa_reprojection", "shadow_pool_size",
+                        "use_shadow_jitter_viewport", "gi_irradiance_pool_size")),
+    "display": frozenset(),
+}
+_LOCAL_PREFIXES = ("debug_",)
+
+
+def _is_local_render_key(attr, k):
+    return k in LOCAL_RENDER_KEYS.get(attr, ()) or (attr == "cycles" and k.startswith(_LOCAL_PREFIXES))
+
+
+def _set_engine(render, v):
+    """Change le moteur. EEVEE s'appelle BLENDER_EEVEE_NEXT en 4.2-4.x et
+    BLENDER_EEVEE ailleurs : on essaie l'autre nom si besoin."""
+    names = [v]
+    if v in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
+        names += [n for n in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE") if n != v]
+    for name in names:
+        if render.engine == name:
+            return
+        try:
+            render.engine = name
+            return
+        except (TypeError, ValueError):
+            continue
+
+
+def read_render_settings(scene):
+    """Reglages de rendu partages, par sous-ensemble ({cle: {prop: valeur}})."""
+    out = {}
+    for key, attr in RENDER_SUBS:
+        sub = getattr(scene, attr, None)
+        if sub is None:
+            continue
+        try:
+            if attr == "render":
+                full = read_struct(sub, depth=1, skip=("views", "stereo_views"))
+                d = {k: v for k, v in full.items() if not _is_output_key(k)}
+            else:
+                d = read_struct(sub, depth=1)
+        except Exception:  # noqa: BLE001
+            continue
+        out[key] = {k: v for k, v in d.items() if not _is_local_render_key(attr, k)}
+    return out
+
+
+def apply_render_settings(scene, key, v, ctx):
+    attr = dict(RENDER_SUBS).get(key)
+    sub = getattr(scene, attr, None) if attr else None
+    if sub is None or not isinstance(v, dict):
+        return
+    d = {k: x for k, x in v.items() if not _is_local_render_key(attr, k)}
+    if attr == "render" and "engine" in d:
+        _set_engine(sub, d.pop("engine"))   # d'abord le moteur : certains reglages en dependent
+    apply_struct(sub, d, ctx)
 
 
 def _is_output_key(k):
@@ -1063,20 +1128,23 @@ def read_output(scene):
 
 
 def capture_local_render(scene):
-    """Reglages de rendu propres a ce PC (pour les garder en rejoignant une session)."""
+    """Reglages propres a ce PC (peripherique, performances, qualite de la vue 3D),
+    pour les garder en rejoignant une session."""
     out = {}
-    try:
-        full = read_struct(scene.render, depth=1, skip=("views", "stereo_views"))
-        out["render"] = {k: v for k, v in full.items() if not _is_output_key(k)}
-    except Exception:  # noqa: BLE001
-        pass
-    for attr in LOCAL_RENDER_SUBS:
+    for _key, attr in RENDER_SUBS:
         sub = getattr(scene, attr, None)
-        if sub is not None:
-            try:
-                out[attr] = read_struct(sub, depth=1)
-            except Exception:  # noqa: BLE001
-                pass
+        if sub is None:
+            continue
+        d = {}
+        for p in sub.bl_rna.properties:
+            k = p.identifier
+            if _is_local_render_key(attr, k) and not p.is_readonly and p.type != "POINTER":
+                try:
+                    d[k] = _conv(getattr(sub, k), p)
+                except Exception:  # noqa: BLE001
+                    continue
+        if d:
+            out[attr] = d
     return out
 
 
@@ -1175,6 +1243,7 @@ def read_scene(scene, ctx, deep=True):
         f["_output"] = read_output(scene)
     except Exception:  # noqa: BLE001
         pass
+    f.update(read_render_settings(scene))
     f["_children"] = _uids(scene.collection.children)
     f["_objects"] = _uids(scene.collection.objects)
     f["_layers"] = _read_layers(scene)
@@ -1207,8 +1276,11 @@ def apply_scene_field(scene, k, v, ctx):
     if k == "_output":
         apply_struct(scene.render, {kk: vv for kk, vv in v.items() if _is_output_key(kk)}, ctx)
         return
+    if k in ("_rnd", "_cyc", "_eev", "_wb"):
+        apply_render_settings(scene, k, v, ctx)
+        return
     if k in ("_render", "_cycles", "_eevee"):
-        return  # anciens champs (versions < 1.2) : reglages de rendu non partages
+        return  # anciens champs (versions < 1.2)
     for key, attr, _depth, _skip in _SCENE_SUBS:
         if k == key:
             sub = getattr(scene, attr, None)

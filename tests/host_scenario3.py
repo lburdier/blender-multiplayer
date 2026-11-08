@@ -109,6 +109,8 @@ try:
     T.check("energie modifiee par le client", round(L.energy) == 55, L.energy)
     T.check("reglages de rendu de l'hote intacts", sc.render.engine == "BLENDER_WORKBENCH"
             and sc.cycles.samples == 99, (sc.render.engine, sc.cycles.samples))
+    T.check("peripherique de l'hote non impose par le client", sc.cycles.device == "CPU", sc.cycles.device)
+    T.check("vue 3D de l'hote non imposee", sc.cycles.preview_samples != 7, sc.cycles.preview_samples)
 
     # H3 : expiration de l'historique
     for i in range(50):

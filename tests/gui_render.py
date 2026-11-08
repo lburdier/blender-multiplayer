@@ -24,6 +24,9 @@ import blender_multiplayer as mp  # noqa: E402
 from blender_multiplayer import session  # noqa: E402
 
 mp.register()
+if os.environ.get("MP_KEEP_PROFILE"):
+    from blender_multiplayer import prefs as _prefs_mod
+    _prefs_mod._defaults.root_dir = os.path.join(OUT, ROLE)
 bpy.context.preferences.view.show_splash = False
 _DIS = os.environ.get("MP_DISABLE", "") if ROLE == "guest" else ""
 if "restore" in _DIS:
@@ -198,8 +201,9 @@ def driver():
     st = ST["step"]
     try:
         if ROLE == "host":
-            if st == 0 and t > 1.0:
-                build_scene()
+            if st == 0 and t > (6.0 if os.environ.get("MP_HOST_FILE") else 1.0):
+                if not os.environ.get("MP_HOST_FILE"):
+                    build_scene()
                 if not os.environ.get("MP_HOST_LATE"):
                     rendered_view()
                 session.host(PORT, "", "Rendu", username="Hote")
@@ -246,6 +250,18 @@ def driver():
                 ST["t"] = time.time()
                 ST["step"] = 3
                 ST["count"] = True
+                _jobs_t0 = time.time()
+                ST["res"]["jobs"] = []
+
+                def _jobs():
+                    el = round(time.time() - _jobs_t0, 1)
+                    busy = bpy.app.is_job_running("SHADER_COMPILATION")
+                    ST["res"]["jobs"].append((el, busy, bpy.app.is_job_running("RENDER_PREVIEW")))
+                    if (not busy and el > 2) or el > 60:
+                        ST["res"]["compile_done_s"] = el
+                        return None
+                    return 0.5
+                bpy.app.timers.register(_jobs, first_interval=0.1)
             elif st == 3 and os.environ.get("MP_POLL") and time.time() - ST["t"] > 2.0 * (1 + len(ST.setdefault("poll", []))):
                 ST["poll"].append(measure("poll"))
                 ST["res"]["poll"] = ST["poll"]
@@ -318,7 +334,14 @@ def driver():
                 measure("2_lampe_invite")
                 ST["step"] = 6
                 ST["t"] = time.time()
-            elif st == 6 and time.time() - ST["t"] > 4.0:
+            elif st == 6 and os.environ.get("MP_GUEST_CYCLES") and "3_cycles" not in ST["res"]:
+                bpy.context.scene.render.engine = "CYCLES"
+                ST["res"]["3_cycles"] = None
+                ST["t"] = time.time()
+            elif st == 6 and time.time() - ST["t"] > (10.0 if os.environ.get("MP_GUEST_CYCLES") else 4.0):
+                if os.environ.get("MP_GUEST_CYCLES"):
+                    measure("3_cycles")
+                ST["res"]["engine_end"] = bpy.context.scene.render.engine
                 bpy.ops.wm.quit_blender()
                 return None
     except Exception:

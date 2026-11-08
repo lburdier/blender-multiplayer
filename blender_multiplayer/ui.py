@@ -7,7 +7,7 @@ import time
 import bpy
 from bpy.props import BoolProperty, IntProperty, PointerProperty, StringProperty
 
-from . import net, prefs
+from . import invite, net, prefs, updater
 from . import session as sess
 
 _MODE_LABELS = {"OBJECT": "Objet", "EDIT": "Edition", "EDIT_MESH": "Edition", "SCULPT": "Sculpt",
@@ -17,8 +17,14 @@ _MODE_LABELS = {"OBJECT": "Objet", "EDIT": "Edition", "EDIT_MESH": "Edition", "S
 
 class MP_Props(bpy.types.PropertyGroup):
     session_name: StringProperty(name="Nom", default="Ma session")
-    address: StringProperty(name="Adresse", default="127.0.0.1",
-                            description="Adresse IP de l'hote (LAN, VPN type Tailscale/ZeroTier...)")
+    address: StringProperty(name="Adresse", default="",
+                            description="Adresse donnee par l'hote : IP du reseau local "
+                                        "(192.168.x.x), adresse Internet (bore.pub:41234) ou lien "
+                                        "d'invitation")
+    online: BoolProperty(name="Accessible par Internet", default=True,
+                         description="Rend la session joignable depuis n'importe quel reseau via un "
+                                     "relais, sans VPN ni ouverture de port, et donne un lien "
+                                     "d'invitation prive (mot de passe genere si vide)")
     port: IntProperty(name="Port", default=5555, min=1024, max=65535)
     password: StringProperty(name="Mot de passe", subtype="PASSWORD", default="")
     as_viewer: BoolProperty(name="Spectateur", default=False,
@@ -42,6 +48,7 @@ class MP_PT_main(bpy.types.Panel):
         p = prefs.get()
         s = sess.current
         if s is None:
+            draw_update_notice(layout, context)
             box = layout.box()
             row = box.row()
             if hasattr(p, "bl_rna"):
@@ -49,34 +56,78 @@ class MP_PT_main(bpy.types.Panel):
                 row.prop(p, "color", text="")
             else:
                 row.label(text="Pseudo : %s" % p.username)
+            online_ok = bool(getattr(bpy.app, "online_access", True))
             box = layout.box()
             box.label(text="Heberger", icon="NETWORK_DRIVE")
             box.prop(mp, "session_name")
+            box.prop(mp, "online")
+            if mp.online and not online_ok:
+                _draw_online_access(box, context)
             row = box.row(align=True)
             row.prop(mp, "port")
-            box.prop(mp, "password")
+            col = box.column(align=True)
+            col.label(text="Mot de passe (genere si vide) :" if mp.online else "Mot de passe (facultatif) :")
+            col.prop(mp, "password", text="")
             box.prop(mp, "sync_frame")
             box.operator("mp.host", icon="PLAY")
+
             box = layout.box()
             box.label(text="Rejoindre", icon="URL")
-            box.prop(mp, "address")
-            box.prop(mp, "port")
-            box.prop(mp, "password")
+            link = _clipboard_invite(context)
+            row = box.row()
+            row.scale_y = 1.5
+            if link is not None:
+                row.operator("mp.join_link", text="Rejoindre \"%s\"" % (link["name"] or "la session"),
+                             icon="LINKED")
+            else:
+                row.operator("mp.join_link", icon="PASTEDOWN")
+            if not online_ok:
+                _draw_online_access(box, context)
+            col = box.column(align=True)
+            col.label(text="Ou saisir l'adresse :")
+            col.prop(mp, "address", text="")
+            row = col.row(align=True)
+            row.prop(mp, "port")
+            col.label(text="Mot de passe :")
+            col.prop(mp, "password", text="")
             box.prop(mp, "as_viewer")
             box.operator("mp.join", icon="LINKED")
             last = getattr(sess, "last_reason", "")
             if last:
-                layout.label(text=last, icon="INFO")
+                import textwrap
+                width = max(20, int(context.region.width / (7.0 * context.preferences.system.ui_scale)))
+                col = layout.box().column(align=True)
+                for i, line in enumerate(textwrap.wrap(last, width)):
+                    col.label(text=line, icon="ERROR" if i == 0 else "BLANK1")
             return
         box = layout.box()
         if s.is_host:
             box.label(text="Hote : %s" % s.session_name, icon="NETWORK_DRIVE")
-            for ip in net.local_addresses()[:3]:
+            row = box.row()
+            row.scale_y = 1.5
+            row.operator("mp.copy_invite", icon="COPYDOWN")
+            t = s.tunnel
+            if t is not None:
+                pub = s.public_address()
+                if pub:
+                    row = box.row(align=True)
+                    row.label(text="Internet : %s" % pub, icon="WORLD")
+                    op = row.operator("mp.copy_address", text="", icon="COPYDOWN")
+                    op.address = pub
+                elif t.state == "retry":
+                    box.label(text="Internet indisponible, nouvel essai... (%s)" % t.error[:60],
+                              icon="ERROR")
+                else:
+                    box.label(text="Ouverture de l'adresse Internet...", icon="TIME")
+            for ip in net.local_addresses()[:2]:
                 row = box.row(align=True)
                 addr = "%s:%d" % (ip, s.port)
-                row.label(text=addr, icon="WORLD")
+                row.label(text="Reseau local : %s" % addr, icon="NETWORK_DRIVE")
                 op = row.operator("mp.copy_address", text="", icon="COPYDOWN")
                 op.address = addr
+            if s.password:
+                box.label(text="Mot de passe : %s" % s.password if s.password_generated
+                          else "Protegee par mot de passe", icon="LOCKED")
             row = box.row()
             op = row.operator("mp.sync_frame", text="Frame partagee" if s.sync_frame else
                               "Frame individuelle", icon="TIME", depress=s.sync_frame)
@@ -282,6 +333,67 @@ class MP_PT_display(bpy.types.Panel):
         for name in ("show_avatars", "show_names", "show_selection", "show_cursors",
                      "show_toasts", "override_undo"):
             col.prop(p, name)
+
+
+_clip_cache = {"t": 0.0, "text": None, "link": None}
+
+
+def _clipboard_invite(context):
+    """Lien d'invitation present dans le presse-papiers (lu au plus 1x/s)."""
+    now = time.time()
+    if now - _clip_cache["t"] > 1.0:
+        _clip_cache["t"] = now
+        try:
+            text = context.window_manager.clipboard or ""
+        except Exception:  # noqa: BLE001
+            text = ""
+        if text != _clip_cache["text"]:
+            _clip_cache["text"] = text
+            _clip_cache["link"] = invite.parse(text) if len(text) < 4096 else None
+    return _clip_cache["link"]
+
+
+def _draw_online_access(layout, context):
+    col = layout.column(align=True)
+    col.label(text="Acces en ligne de Blender desactive", icon="ERROR")
+    col.prop(context.preferences.system, "use_online_access", text="Autoriser l'acces en ligne")
+
+
+def draw_update_notice(layout, context):
+    st = updater.state["status"]
+    done = updater.updated_from()
+    if st == "available":
+        box = layout.box()
+        box.label(text="Nouvelle version %s disponible" % updater.state["latest"], icon="INFO")
+        box.operator("mp.install_update", icon="IMPORT")
+    elif st in ("downloading", "installing"):
+        layout.label(text="Mise a jour en cours...", icon="TIME")
+    elif done:
+        layout.label(text="Addon mis a jour : %s -> %s" % done, icon="CHECKMARK")
+
+
+def draw_update_status(layout, context):
+    st = updater.state
+    row = layout.row()
+    row.label(text="Version installee : %s" % updater.current_version_str())
+    row.operator("mp.check_update", text="", icon="FILE_REFRESH")
+    status = st["status"]
+    if status == "available":
+        row = layout.row()
+        row.label(text="Version %s disponible" % st["latest"], icon="INFO")
+        row.operator("mp.install_update", icon="IMPORT")
+    elif status == "uptodate":
+        layout.label(text="A jour", icon="CHECKMARK")
+    elif status == "checking":
+        layout.label(text="Verification...", icon="TIME")
+    elif status in ("downloading", "installing"):
+        layout.label(text="Mise a jour en cours...", icon="TIME")
+    elif status == "installed":
+        layout.label(text="Mise a jour installee", icon="CHECKMARK")
+    elif status == "error":
+        layout.label(text="Echec : %s" % st["error"][:80], icon="ERROR")
+    elif status == "offline":
+        layout.label(text="Acces en ligne desactive", icon="ERROR")
 
 
 def draw_header(self, context):

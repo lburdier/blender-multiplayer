@@ -2,28 +2,45 @@
 
 Éditez **la même scène Blender à plusieurs, en temps réel**. Chacun travaille de son côté, voit les autres se déplacer dans la scène, voit ce qu'ils sélectionnent, créent et modifient, avec un historique collaboratif (Ctrl+Z partagé, retour à n'importe quel point), des autosauvegardes et des sauvegardes restaurables.
 
-Testé sous **Blender 4.3, 5.0 et 5.1**, y compris en mélangeant les versions (hôte 5.1 et client 5.0, et l'inverse). Les API qui changent d'une version à l'autre sont détectées à l'exécution, pour viser aussi les versions suivantes (5.2, 5.3…).
+Testé sous **Blender 4.3, 5.0 et 5.1**, y compris en mélangeant les versions 5.x (hôte 5.1 et client 5.0, et l'inverse), en réseau local comme par Internet. Les API qui changent d'une version à l'autre sont détectées à l'exécution, pour viser aussi les versions suivantes (5.2, 5.3…).
 
 ## Installation
 
-1. Télécharger le fichier `blender_multiplayer-x.y.z.zip` de la [dernière version](https://github.com/lburdier/blender-multiplayer/releases/latest) (ne pas le décompresser).
+**Avec mises à jour automatiques (recommandé)**
+
+1. Blender > *Edit > Preferences > Get Extensions* > menu **Repositories** > **+** > **Add Remote Repository**.
+2. URL : `https://lburdier.github.io/blender-multiplayer/index.json`, cocher **Check for Updates on Startup**.
+3. Chercher **Blender Multiplayer** dans *Get Extensions* > **Install**.
+
+**Depuis le fichier zip**
+
+1. Télécharger `blender_multiplayer-x.y.z.zip` sur la [page de téléchargement](https://lburdier.github.io/blender-multiplayer/) ou la [dernière version GitHub](https://github.com/lburdier/blender-multiplayer/releases/latest) (sans le décompresser).
 2. Blender > *Edit > Preferences > Get Extensions* > menu ⌄ > **Install from Disk…** > choisir le `.zip`.
-3. Dans les préférences de l'extension : choisir son **pseudo** et sa **couleur**.
 
-Tous les joueurs doivent installer la même version de l'addon.
+Dans les deux cas, choisir ensuite son **pseudo** et sa **couleur** dans les préférences de l'extension. L'interface se trouve dans la vue 3D, barre latérale (**N**) > onglet **Multijoueur**.
 
-L'interface se trouve dans la vue 3D, barre latérale (**N**) > onglet **Multijoueur**.
+### Mises à jour
+
+Au démarrage de Blender, l'addon vérifie s'il existe une nouvelle version et **l'installe tout seul** (jamais pendant une session), quel que soit le mode d'installation. On peut aussi la lancer d'un clic (bannière dans l'onglet Multijoueur), ou désactiver l'installation automatique dans les préférences. La vérification respecte le réglage *Autoriser l'accès en ligne* de Blender (*Preferences > System > Network*). Tous les joueurs doivent utiliser la même version de l'addon : les mises à jour automatiques s'en chargent.
 
 ## Jouer
 
-| Rôle | Étapes |
+**Le plus simple : le lien d'invitation (fonctionne depuis n'importe où, sans VPN ni port à ouvrir)**
+
+1. L'hôte ouvre sa scène > *Héberger* (case **Accessible par Internet** cochée) > **Copier le lien d'invitation** > l'envoie (Discord, mail…).
+2. L'invité copie le lien > **Rejoindre avec le lien copié**. C'est tout.
+
+Le lien est **privé** : il contient l'adresse de la session et son mot de passe (généré automatiquement si l'hôte n'en a pas mis). Ouvert dans un navigateur, il affiche simplement le mode d'emploi. Il reste valable tant que la session est ouverte.
+
+| Rôle | Autres façons de faire |
 |---|---|
-| **Hôte** | Ouvrir sa scène > *Héberger* (nom, port, mot de passe facultatif) > communiquer l'adresse affichée (bouton copier) |
-| **Joueur** | Saisir l'adresse et le port > *Rejoindre*. La scène de l'hôte remplace la vôtre (votre fichier est sauvegardé avant) |
+| **Hôte** | Les adresses sont affichées dans le panneau (Internet et réseau local), avec un bouton copier |
+| **Joueur** | Saisir l'adresse (`192.168.1.20`, `bore.pub:41234`…, le port peut être inclus) > *Rejoindre*. La scène de l'hôte remplace la vôtre (votre fichier est sauvegardé avant) |
 | **Spectateur** | Cocher *Spectateur* avant de rejoindre : on voit tout, on ne peut rien modifier |
 
-- **Réseau local** : adresse IP de l'hôte (ex. `192.168.1.20`), port `5555` par défaut.
-- **Par Internet** : le plus simple est un VPN de jeu (Tailscale, ZeroTier, Radmin VPN…) ; sinon, ouvrir/rediriger le port TCP sur la box de l'hôte. Le pare-feu Windows demandera l'autorisation au premier lancement.
+- **Réseau local** : adresse IP de l'hôte (ex. `192.168.1.20`), port `5555` par défaut. Le lien d'invitation essaie d'abord le réseau local, puis Internet.
+- **Par Internet** : la case *Accessible par Internet* ouvre un tunnel vers un relais TCP public ([bore](https://github.com/ekzhang/bore), serveur `bore.pub`) ; aucun réglage de box n'est nécessaire. Le relais est modifiable dans les préférences (vous pouvez héberger le vôtre avec `bore server`). Un VPN de jeu (Tailscale, ZeroTier…) ou une redirection de port restent possibles.
+- `127.0.0.1` désigne **votre propre PC** : ce n'est pas l'adresse à utiliser pour rejoindre quelqu'un d'autre.
 
 ## Ce qui est synchronisé
 
@@ -68,15 +85,17 @@ L'hôte peut **restaurer** n'importe quelle sauvegarde : tous les joueurs sont r
 - **Fusion par propriété** : deux joueurs qui modifient des propriétés différentes d'un même objet ne s'écrasent jamais.
 - **Identité stable** : chaque data-block porte un identifiant caché (`_mp_uid`) qui survit aux renommages, à la sauvegarde, au chargement ; les doublons (Maj+D) sont détectés.
 - **Sans écho** : l'état relu après application d'un changement distant devient l'état connu, il n'est jamais renvoyé. Les propriétés animées ou pilotées par des drivers ne sont pas diffusées (changer de frame ne crée aucune opération).
-- Réseau : TCP, trames binaires compressées, aucune dépendance externe (uniquement la bibliothèque standard de Python et numpy, fourni avec Blender).
+- Réseau : TCP, trames binaires compressées, aucune dépendance externe (uniquement la bibliothèque standard de Python et numpy, fourni avec Blender). Tunnel Internet : client du protocole bore écrit en Python pur.
+- Publication : à chaque version GitHub, une action GitHub régénère le dépôt d'extensions (`index.json`, même format que `blender --command extension server-generate`) et le site sur GitHub Pages.
 
 ## Limites connues
 
 - Si l'**hôte quitte**, la session s'arrête (chacun garde sa scène et ses sauvegardes). Il n'y a pas de migration d'hôte.
-- Le trafic est authentifié par mot de passe mais **non chiffré** : par Internet, passer par un VPN. Ne rejoindre que des hôtes de confiance (les données échangées sont des fichiers .blend ; l'exécution automatique de scripts est désactivée au chargement).
+- Le trafic est authentifié par mot de passe (jamais transmis en clair) mais **non chiffré** : avec le relais public, les données de la scène transitent par un serveur tiers (`bore.pub`). Pour un projet confidentiel, utilisez votre propre relais ou un VPN. Ne rejoindre que des hôtes de confiance (les données échangées sont des fichiers .blend ; l'exécution automatique de scripts est désactivée au chargement).
+- Le relais public `bore.pub` est un service gratuit et bénévole : il ajoute de la latence (quelques centaines de ms, sans gêne pour l'édition) et sa disponibilité n'est pas garantie. S'il ne répond pas, le panneau l'indique et réessaie tout seul.
 - Non synchronisés en direct : pixels peints en *Texture Paint* (synchronisés quand l'image est enregistrée/empaquetée), drivers et pistes NLA des objets, ajout de corps rigides/physique par opérateur, séquenceur vidéo, compositing ancien format (4.x).
 - Le Ctrl+Z natif reste accessible par le menu *Edit* : en session, il est neutralisé (la scène est remise dans l'état partagé) et un message indique d'utiliser le Ctrl+Z multijoueur.
-- Pour une fidélité parfaite, utilisez la même version de Blender (un avertissement s'affiche sinon).
+- Pour une fidélité parfaite, utilisez la même version de Blender (un avertissement s'affiche sinon). On ne peut pas mélanger **Blender 4.x et Blender 5.x** dans une même session : Blender 5 a changé le format des fichiers, illisible par Blender 4. Le joueur concerné reçoit un message clair.
 
 ## Tests
 
@@ -84,6 +103,14 @@ L'hôte peut **restaurer** n'importe quelle sauvegarde : tous les joueurs sont r
 # Hôte et client Blender en arrière-plan, scénario complet, comparaison des scènes
 python tests/run_integration.py "<blender hôte>" "<blender client>" 57123      # scénario 1
 python tests/run_integration.py "<blender hôte>" "<blender client>" 57124 2    # scénario 2 (types de données)
+MP_TEST_ONLINE=1 python tests/run_integration.py "<hôte>" "<client>" 57125     # scénario 1 via le relais Internet et le lien d'invitation
+python tests/run_update_test.py "<blender>" dist/blender_multiplayer-x.y.z.zip  # mise à jour automatique (zip et dépôt distant)
 ```
 
 Le scénario 1 couvre la création et la suppression à distance, les matériaux, le Ctrl+Z partagé, les modifications simultanées, le verrou en mode Édition avec la géométrie en direct, les modificateurs, les collections, les parents, le retour à un point et son annulation, les sauvegardes. Le scénario 2 couvre les lumières, les caméras, l'animation, Geometry Nodes, les images, les courbes, l'armature (pose et os), le texte, Maj+D, les conflits de noms simultanés et l'absence d'opération quand on change de frame.
+
+## Publier une nouvelle version
+
+1. Augmenter `version` dans `blender_multiplayer/blender_manifest.toml` et `bl_info` dans `blender_multiplayer/__init__.py`, puis commiter.
+2. `python tools/release.py "<chemin de blender.exe>"` : construit le zip, pousse `main` et crée la version GitHub.
+3. GitHub Actions met à jour le dépôt d'extensions en 1 à 2 minutes ; les addons installés se mettent à jour au prochain démarrage de Blender.

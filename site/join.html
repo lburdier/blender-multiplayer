@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <title>Invitation – Blender Multiplayer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1 id="title">Invitation à une session Blender</h1>
+  <p class="muted" id="sub">Quelqu'un vous invite à éditer sa scène Blender avec lui, en temps réel.</p>
+
+  <div class="card" id="steps">
+    <h2>Rejoindre en 3 étapes</h2>
+    <ol>
+      <li>Installer l'addon <b>Blender Multiplayer</b> si ce n'est pas déjà fait :
+        <a href="./">page de téléchargement</a> (Blender 4.2 et plus).</li>
+      <li>Copier ce lien d'invitation :
+        <div class="row" style="margin-top:6px">
+          <span class="code" id="link"></span>
+          <button class="btn" onclick="copyLink(this)">Copier</button>
+        </div>
+      </li>
+      <li>Dans Blender : vue 3D › touche <b>N</b> › onglet <b>Multijoueur</b> › <b>Rejoindre avec le lien copié</b>.</li>
+    </ol>
+  </div>
+
+  <div class="card" id="bad" hidden>
+    <h2 class="warn">Lien incomplet</h2>
+    <p>Ce lien d'invitation est invalide ou a été tronqué. Demandez à l'hôte de recopier son lien avec le bouton <b>Copier le lien d'invitation</b>.</p>
+  </div>
+
+  <p class="muted">Ce lien est privé : il donne accès à la session. Ne le partagez pas. Les informations de connexion restent dans votre navigateur (partie après le « # », jamais envoyée au serveur).</p>
+  <footer><a href="https://github.com/lburdier/blender-multiplayer">Blender Multiplayer</a> · GPL-3.0</footer>
+</main>
+<script>
+function decode(token) {
+  try {
+    let b = token.replace(/-/g, "+").replace(/_/g, "/");
+    while (b.length % 4) b += "=";
+    const bytes = Uint8Array.from(atob(b), c => c.charCodeAt(0));
+    const data = JSON.parse(new TextDecoder().decode(bytes));
+    return Array.isArray(data.a) && data.a.length ? data : null;
+  } catch (e) { return null; }
+}
+const token = location.hash.slice(1);
+const data = token ? decode(token) : null;
+if (!data) {
+  document.getElementById("bad").hidden = false;
+  document.getElementById("steps").hidden = true;
+} else {
+  if (data.n) {
+    document.getElementById("title").textContent = "Invitation : « " + data.n + " »";
+    document.title = data.n + " – Blender Multiplayer";
+  }
+  document.getElementById("link").textContent = location.href;
+}
+function copyLink(btn) {
+  navigator.clipboard.writeText(location.href).then(() => {
+    btn.textContent = "Copié !"; setTimeout(() => btn.textContent = "Copier", 1500);
+  });
+}
+</script>
+</body>
+</html>

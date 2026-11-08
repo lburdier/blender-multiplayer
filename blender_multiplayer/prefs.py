@@ -44,6 +44,14 @@ class MP_AddonPreferences(bpy.types.AddonPreferences):
     show_selection: BoolProperty(name="Selections", default=True)
     show_cursors: BoolProperty(name="Curseurs 3D", default=True)
     show_toasts: BoolProperty(name="Messages a l'ecran", default=True)
+    relay: StringProperty(name="Serveur relais", default="bore.pub:7835",
+                          description="Relais TCP compatible bore utilise pour rendre la session "
+                                      "joignable par Internet (bore.pub est public et gratuit ; "
+                                      "vous pouvez heberger le votre avec 'bore server')")
+    check_updates: BoolProperty(name="Verifier les mises a jour au demarrage", default=True)
+    auto_update: BoolProperty(name="Installer automatiquement les mises a jour", default=True,
+                              description="Installe la nouvelle version au demarrage de Blender "
+                                          "(jamais pendant une session)")
 
     def draw(self, context):
         layout = self.layout
@@ -65,6 +73,18 @@ class MP_AddonPreferences(bpy.types.AddonPreferences):
         grid = box.grid_flow(columns=3)
         for p in ("show_avatars", "show_names", "show_selection", "show_cursors", "show_toasts"):
             grid.prop(self, p)
+        box = layout.box()
+        box.label(text="Internet", icon="WORLD")
+        box.prop(self, "relay")
+        if not getattr(bpy.app, "online_access", True):
+            box.prop(context.preferences.system, "use_online_access",
+                     text="Autoriser l'acces en ligne (requis pour Internet et les mises a jour)")
+        box = layout.box()
+        box.label(text="Mises a jour", icon="FILE_REFRESH")
+        box.prop(self, "check_updates")
+        box.prop(self, "auto_update")
+        from . import ui
+        ui.draw_update_status(box, context)
 
 
 class _Defaults:
@@ -83,6 +103,9 @@ class _Defaults:
     show_selection = True
     show_cursors = True
     show_toasts = True
+    relay = "bore.pub:7835"
+    check_updates = True
+    auto_update = True
 
 
 _defaults = _Defaults()

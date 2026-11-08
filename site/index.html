@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blender Multiplayer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Blender Multiplayer</h1>
+  <p class="muted">Éditez la même scène Blender à plusieurs, en temps réel, même sans être sur le même réseau.</p>
+
+  <div class="card">
+    <h2>Télécharger</h2>
+    <p>Version actuelle : <span class="tag" id="ver">…</span> · Blender 4.2 et plus</p>
+    <a class="btn" id="dl" href="https://github.com/lburdier/blender-multiplayer/releases/latest">Télécharger l'addon (.zip)</a>
+    <a class="btn secondary" href="https://github.com/lburdier/blender-multiplayer#readme">Mode d'emploi</a>
+  </div>
+
+  <div class="card">
+    <h2>Installer avec les mises à jour automatiques (recommandé)</h2>
+    <ol>
+      <li>Blender › <b>Edit › Preferences › Get Extensions</b> › menu <b>Repositories</b> › <b>+</b> › <b>Add Remote Repository</b>.</li>
+      <li>Coller cette adresse et cocher <b>Check for Updates on Startup</b> :
+        <div class="row" style="margin-top:6px">
+          <span class="code" id="repo">https://lburdier.github.io/blender-multiplayer/index.json</span>
+          <button class="btn secondary" onclick="copy('repo', this)">Copier</button>
+        </div>
+      </li>
+      <li>Chercher <b>Blender Multiplayer</b> dans Get Extensions › <b>Install</b>.</li>
+    </ol>
+    <p class="muted" style="margin-top:12px">Installé depuis le .zip, l'addon vérifie aussi lui-même les nouvelles versions au démarrage et se met à jour tout seul (réglable dans ses préférences).</p>
+  </div>
+
+  <div class="card">
+    <h2>Jouer</h2>
+    <ol>
+      <li>Vue 3D › touche <b>N</b> › onglet <b>Multijoueur</b>.</li>
+      <li>L'hôte clique <b>Héberger</b> puis <b>Copier le lien d'invitation</b> et l'envoie (Discord, mail…).</li>
+      <li>L'invité copie le lien et clique <b>Rejoindre avec le lien copié</b>. C'est tout : pas de VPN, pas de port à ouvrir.</li>
+    </ol>
+  </div>
+
+  <footer>Licence GPL-3.0 · <a href="https://github.com/lburdier/blender-multiplayer">Code source</a></footer>
+</main>
+<script>
+function copy(id, btn) {
+  navigator.clipboard.writeText(document.getElementById(id).textContent.trim()).then(() => {
+    const t = btn.textContent; btn.textContent = "Copié !"; setTimeout(() => btn.textContent = t, 1500);
+  });
+}
+fetch("index.json", {cache: "no-store"}).then(r => r.json()).then(idx => {
+  const pk = idx.data.filter(e => e.id === "blender_multiplayer")
+    .sort((a, b) => a.version.localeCompare(b.version, undefined, {numeric: true})).pop();
+  if (!pk) return;
+  document.getElementById("ver").textContent = pk.version;
+  document.getElementById("dl").href = pk.archive_url;
+  document.getElementById("dl").setAttribute("download", "");
+}).catch(() => { document.getElementById("ver").textContent = "voir GitHub"; });
+</script>
+</body>
+</html>

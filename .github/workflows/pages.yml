@@ -1,0 +1,56 @@
+name: Site et depot d'extensions
+
+# Publie sur GitHub Pages : le site (page de telechargement, page d'invitation)
+# et le depot d'extensions Blender (index.json + zips de toutes les versions),
+# a chaque version publiee ou modification du site.
+on:
+  release:
+    types: [published, edited, deleted]
+  push:
+    branches: [main]
+    paths: ["site/**", "tools/make_index.py", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recuperer les versions publiees
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p public
+          cp -r site/. public/
+          tags=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,isDraft,isPrerelease \
+            --jq '.[] | select(.isDraft | not) | select(.isPrerelease | not) | .tagName')
+          for tag in $tags; do
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern 'blender_multiplayer-*.zip' --dir public --clobber
+          done
+          python3 tools/make_index.py public
+          ls -la public
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

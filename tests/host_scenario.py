@@ -18,7 +18,14 @@ try:
     sphere = bpy.context.active_object
     sphere.name = "HostSphere"
 
-    s = session.host(T.PORT, "secret", "Test", username="Hote")
+    s = session.host(T.PORT, "secret", "Test", username="Hote", online=T.ONLINE)
+    if T.ONLINE:
+        T.wait_for(lambda: s.public_address(), 30, "adresse Internet")
+        T.check("adresse Internet ouverte", bool(s.public_address()), s.tunnel.error)
+        with open(T.INVITE_FILE + ".tmp", "w", encoding="utf-8") as fh:
+            fh.write(s.invite_link())
+        os.replace(T.INVITE_FILE + ".tmp", T.INVITE_FILE)
+        T.log("lien:", s.invite_link())
     T.wait_for(lambda: len(s.users) == 2, 40, "arrivee du client")
     T.barrier("CLIENT_READY", 60)
 

@@ -20,6 +20,9 @@ from blender_multiplayer import session  # noqa: E402
 mp.register()
 
 RESULTS = {"checks": [], "errors": []}
+# MP_TEST_ONLINE=1 : la session passe par le relais Internet (lien d'invitation)
+ONLINE = os.environ.get("MP_TEST_ONLINE") == "1"
+INVITE_FILE = os.path.join(OUT, "invite.txt")
 ROLE = "?"
 
 

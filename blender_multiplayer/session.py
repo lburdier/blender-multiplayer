@@ -18,20 +18,33 @@ import hmac
 import os
 import queue
 import re
+import secrets
+import sys
 import time
 import traceback
 
 import bpy
 
-from . import compat, history, ids, net, payloads, presence, serialize
+from . import compat, history, ids, invite, net, payloads, presence, serialize, tunnel
 from . import tracker as tracker_mod
 
 current = None
+last_reason = ""          # affiche dans le panneau apres la fin d'une session
+_SILENT_REASONS = {"", "depart", "nouvelle session", "arret par l'hote", "addon desactive"}
 
 PALETTE = [(0.95, 0.35, 0.25), (0.25, 0.65, 0.98), (0.35, 0.85, 0.40), (0.98, 0.78, 0.20),
            (0.75, 0.45, 0.98), (0.20, 0.85, 0.85), (0.98, 0.45, 0.72), (0.65, 0.65, 0.65)]
 
-ADDON_VERSION = "1.0.0"
+ADDON_VERSION = compat.ADDON_VERSION_STR
+
+
+def file_family(version_str):
+    """4 ou 5 : Blender 5.0 a change l'en-tete des fichiers .blend, illisibles par 4.x
+    (et les blocs envoyes par un 5.x sont illisibles par un hote 4.x)."""
+    try:
+        return 5 if int(str(version_str).split(".")[0]) >= 5 else 4
+    except ValueError:
+        return 0
 
 
 def _prefs():
@@ -260,10 +273,12 @@ class BaseSession:
             self.log("sauvegarde locale: %s" % exc)
 
     def stop(self, reason=""):
-        global current
+        global current, last_reason
         self.active = False
         self.state = "closed"
         self.closed_reason = reason
+        if current is self or current is None:
+            last_reason = "" if reason in _SILENT_REASONS else "Session terminee : %s" % reason
         if current is self:
             current = None
         compat.tag_redraw()
@@ -298,12 +313,19 @@ class HostSession(BaseSession):
         self.msg_seq = 0
         self.next_user = 2
         self.history = None
+        self.tunnel = None
+        self.password_generated = False
+        self._tunnel_seen = (None, 0)
         self.autosave_t = time.time()
         self.autosave_seq = 0
         self.flush_t = time.time()
 
-    def start(self, port, password, session_name, sync_frame=False):
+    def start(self, port, password, session_name, sync_frame=False, online=False, relay=""):
         global current
+        if online and not password:
+            # Joignable depuis Internet : jamais sans mot de passe.
+            password = secrets.token_urlsafe(6)
+            self.password_generated = True
         self.session_name = session_name or "Session"
         self.session_dir = os.path.join(root_dir(), "sessions",
                                         "%s_%s" % (_safe(self.session_name), _stamp()))
@@ -316,6 +338,8 @@ class HostSession(BaseSession):
         self.password = password or ""
         self.port = int(port)
         self.server = net.Server(self.port, self.inbox)
+        if online:
+            self.tunnel = tunnel.Tunnel(self.port, relay or tunnel.DEFAULT_RELAY)
         self.tracker.init_known(write_blobs=True)
         try:
             compat.save_copy(os.path.join(self.session_dir, "checkpoints", "00_depart.blend"))
@@ -339,8 +363,47 @@ class HostSession(BaseSession):
         return self
 
     def status_line(self):
-        return "Multijoueur - Hote \"%s\" - %d joueur(s) - port %d" % (
-            self.session_name, len(self.users), self.port)
+        return "Multijoueur - Hote \"%s\" - %d joueur(s) - %s" % (
+            self.session_name, len(self.users), self.public_address() or "port %d" % self.port)
+
+    def public_address(self):
+        return self.tunnel.public_address if self.tunnel is not None else ""
+
+    def invite_addresses(self):
+        """Adresses a essayer par l'invite : reseau local principal (delai court),
+        puis Internet, puis les autres adresses locales."""
+        lan = [(ip, self.port) for ip in net.local_addresses() if not ip.startswith("127.")]
+        out = lan[:1]
+        pub = self.public_address()
+        if pub:
+            host, _, port = pub.rpartition(":")
+            out.append((host, int(port)))
+        out.extend(lan[1:3])
+        return out
+
+    def invite_link(self):
+        return invite.make(self.session_name, self.invite_addresses(), self.password)
+
+    def _tunnel_tick(self):
+        t = self.tunnel
+        if t is None:
+            return
+        seen = (t.state, t.generation)
+        if seen == self._tunnel_seen:
+            return
+        prev_state, prev_gen = self._tunnel_seen
+        self._tunnel_seen = seen
+        if t.state == "open":
+            if prev_gen and t.generation != prev_gen and t.public_address:
+                self.toast("Adresse Internet retablie : %s" % t.public_address, (0.5, 1, 0.5))
+            else:
+                self.toast("Session joignable par Internet : %s" % t.public_address, (0.5, 1, 0.5))
+            self.log("tunnel ouvert: %s" % t.public_address)
+            compat.tag_redraw()
+        elif t.state == "retry" and prev_state in (None, "connecting", "open"):
+            self.toast("Adresse Internet indisponible (%s), nouvel essai..." % t.error, (1, 0.7, 0.3))
+            self.log("tunnel: %s" % t.error)
+            compat.tag_redraw()
 
     # ------------------------------------------------------------------
     def _ready_conns(self, exclude=None):
@@ -378,6 +441,7 @@ class HostSession(BaseSession):
         self._presence_tick(now)
         self._enforce_locks()
         self._autosave_tick(now)
+        self._tunnel_tick()
         if now - self.flush_t > 3.0:
             self.flush_t = now
             if self.history is not None and self.history._unflushed is not None \
@@ -453,6 +517,7 @@ class HostSession(BaseSession):
         elif t == "ping":
             conn.send({"type": "pong", "t": msg.get("t")})
         elif t == "bye":
+            client["left"] = True
             conn.close("depart")
 
     def _on_hello(self, cid, conn, client, msg):
@@ -464,6 +529,15 @@ class HostSession(BaseSession):
         if self.password and msg.get("auth") != _auth(self.password, client["nonce"]):
             conn.send({"type": "kick", "reason": "Mot de passe incorrect."})
             conn.close_after_flush()
+            return
+        cver = str(msg.get("ver", ""))
+        if file_family(cver) != file_family(compat.VERSION_STR):
+            conn.send({"type": "kick", "reason": (
+                "Versions de Blender incompatibles : l'hote utilise Blender %s, vous Blender %s. "
+                "Les fichiers de Blender 4.x et de Blender 5.x ne se lisent pas entre eux : "
+                "utilisez tous Blender 5.0 ou plus (ou tous Blender 4.x)." % (compat.VERSION_STR, cver))})
+            conn.close_after_flush()
+            self.log("joueur refuse : Blender %s (hote %s)" % (cver, compat.VERSION_STR))
             return
         name = (msg.get("name") or "Joueur").strip()[:32] or "Joueur"
         taken = {u["name"] for u in self.users.values()}
@@ -538,7 +612,10 @@ class HostSession(BaseSession):
         self._recompute_locks()
         self.broadcast(self._users_msg())
         if user:
-            self.post_system("%s a quitte la session (%s)." % (user["name"], reason))
+            if client.get("left"):
+                self.post_system("%s a quitte la session." % user["name"])
+            else:
+                self.post_system("%s a ete deconnecte (%s)." % (user["name"], reason))
 
     # ------------------------------------------------------------------
     # Validation + application + historique + diffusion
@@ -920,6 +997,8 @@ class HostSession(BaseSession):
                 self.autosave()
         except Exception as exc:  # noqa: BLE001
             self.log("arret: %s" % exc)
+        if self.tunnel is not None:
+            self.tunnel.stop()
         if self.server is not None:
             time.sleep(0.1)
             self.server.stop()
@@ -947,14 +1026,14 @@ class ClientSession(BaseSession):
         self.host_ver = ""
         self.snapshot_size = 0
 
-    def connect(self, address, port, password=""):
+    def connect(self, address, port, password="", timeout=8.0):
         global current
         self.address = address
         self.port = int(port)
         self.password = password or ""
         self.session_dir = os.path.join(root_dir(), "joined", "%s_%s" % (_safe(address), _stamp()))
         os.makedirs(self.session_dir, exist_ok=True)
-        self.conn = net.connect(address, self.port, self.inbox)
+        self.conn = net.connect(address, self.port, self.inbox, timeout=timeout)
         self.state = "auth"
         current = self
         self._start_timer()
@@ -1261,16 +1340,20 @@ class ClientSession(BaseSession):
 # API simple
 # ===========================================================================
 
-def host(port, password="", session_name="Session", username=None, color=None, sync_frame=False):
-    global current
+def host(port, password="", session_name="Session", username=None, color=None, sync_frame=False,
+         online=False, relay=""):
+    global current, last_reason
+    last_reason = ""
     if current is not None:
         current.stop("nouvelle session")
     p = _prefs()
     s = HostSession(username or p.username or "Hote", color or tuple(p.color))
     try:
-        s.start(port, password, session_name, sync_frame=sync_frame)
+        s.start(port, password, session_name, sync_frame=sync_frame, online=online, relay=relay)
     except Exception:
         current = None
+        if s.tunnel is not None:
+            s.tunnel.stop()
         if s.server is not None:
             s.server.stop()
         raise
@@ -1278,13 +1361,45 @@ def host(port, password="", session_name="Session", username=None, color=None, s
 
 
 def join(address, port, password="", username=None, color=None, viewer=False):
-    global current
+    global current, last_reason
+    last_reason = ""
     if current is not None:
         current.stop("nouvelle session")
     p = _prefs()
     s = ClientSession(username or p.username or "Joueur", color or tuple(p.color), viewer=viewer)
-    s.connect(address, port, password)
+    s.connect(address, port, password, timeout=invite.connect_timeout(address))
     return s
+
+
+def join_any(addresses, password="", username=None, color=None, viewer=False):
+    """Essaie chaque adresse (hote, port) dans l'ordre ; renvoie la session
+    connectee ou leve OSError avec le detail de chaque essai."""
+    errors = []
+    for address, port in addresses:
+        try:
+            return join(address, port, password, username=username, color=color, viewer=viewer)
+        except OSError as exc:
+            errors.append("%s:%d (%s)" % (address, port, describe_error(exc, address)))
+    raise OSError("aucune adresse ne repond : " + " ; ".join(errors))
+
+
+def describe_error(exc, address=""):
+    """Message clair pour un echec de connexion."""
+    if isinstance(exc, ConnectionRefusedError) or getattr(exc, "winerror", None) == 10061:
+        msg = "personne n'heberge de session a cette adresse et ce port"
+        if address in ("127.0.0.1", "localhost", "::1"):
+            msg += " (127.0.0.1 designe votre propre PC : utilisez le lien ou l'adresse de l'hote)"
+        return msg
+    if isinstance(exc, (TimeoutError, socket_timeout())):
+        return "l'hote ne repond pas (pas sur le meme reseau ? utilisez le lien d'invitation)"
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in (11001, -2, -3, 8):
+        return "adresse introuvable"
+    return str(exc)
+
+
+def socket_timeout():
+    import socket
+    return socket.timeout
 
 
 def leave():

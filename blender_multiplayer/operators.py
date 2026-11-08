@@ -8,7 +8,7 @@ import sys
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-from . import net, prefs, presence
+from . import invite, net, prefs, presence, updater
 from . import session as sess
 
 
@@ -23,14 +23,18 @@ class MP_OT_host(bpy.types.Operator):
 
     def execute(self, context):
         mp = context.window_manager.mp
+        online = mp.online and bool(getattr(bpy.app, "online_access", True))
         try:
             sess.host(mp.port, mp.password, mp.session_name or "Session",
-                      sync_frame=mp.sync_frame)
+                      sync_frame=mp.sync_frame, online=online, relay=prefs.get().relay)
         except OSError as exc:
             self.report({"ERROR"}, "Impossible d'ouvrir le port %d : %s" % (mp.port, exc))
             return {"CANCELLED"}
-        self.report({"INFO"}, "Session ouverte. Adresse : %s port %d" %
-                    (", ".join(net.local_addresses()), mp.port))
+        if online:
+            self.report({"INFO"}, "Session ouverte. Copiez le lien d'invitation pour inviter des joueurs.")
+        else:
+            self.report({"INFO"}, "Session ouverte (reseau local) : %s port %d" %
+                        (", ".join(net.local_addresses()), mp.port))
         return {"FINISHED"}
 
 
@@ -47,11 +51,109 @@ class MP_OT_join(bpy.types.Operator):
 
     def execute(self, context):
         mp = context.window_manager.mp
-        try:
-            sess.join(mp.address.strip(), mp.port, mp.password, viewer=mp.as_viewer)
-        except OSError as exc:
-            self.report({"ERROR"}, "Connexion impossible a %s:%d : %s" % (mp.address, mp.port, exc))
+        text = mp.address.strip()
+        link = invite.parse(text) if ("#" in text or "/" in text) else None
+        if link is not None:
+            return _join_link(self, link, mp.as_viewer)
+        host, port = invite.parse_address(text, mp.port)
+        if not host:
+            self.report({"ERROR"}, "Saisissez l'adresse donnee par l'hote, ou utilisez son lien "
+                                   "d'invitation (bouton \"Rejoindre avec le lien copie\").")
             return {"CANCELLED"}
+        try:
+            sess.join(host, port, mp.password, viewer=mp.as_viewer)
+        except OSError as exc:
+            self.report({"ERROR"}, "Connexion impossible a %s:%d : %s" % (
+                host, port, sess.describe_error(exc, host)))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+def _join_link(op, link, viewer):
+    if not getattr(bpy.app, "online_access", True) and \
+            not all(invite.is_private(h) for h, _p in link["addresses"]):
+        op.report({"ERROR"}, "L'acces en ligne de Blender est desactive : cochez \"Autoriser "
+                             "l'acces en ligne\" dans l'onglet Multijoueur, puis recommencez.")
+        return {"CANCELLED"}
+    try:
+        sess.join_any(link["addresses"], link["password"], viewer=viewer)
+    except OSError as exc:
+        op.report({"ERROR"}, "Impossible de rejoindre \"%s\" : %s. L'hote a peut-etre ferme la "
+                             "session ; demandez-lui un nouveau lien." % (link["name"], exc))
+        return {"CANCELLED"}
+    op.report({"INFO"}, "Connexion a \"%s\"..." % link["name"])
+    return {"FINISHED"}
+
+
+class MP_OT_join_link(bpy.types.Operator):
+    bl_idname = "mp.join_link"
+    bl_label = "Rejoindre avec le lien copie"
+    bl_description = ("Rejoint la session du lien d'invitation copie dans le presse-papiers "
+                      "(votre scene sera remplacee par celle de l'hote, une copie est faite avant)")
+    link: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def invoke(self, context, event):
+        if not self.link:
+            self.link = context.window_manager.clipboard or ""
+        if invite.parse(self.link) is None:
+            self.report({"ERROR"}, "Aucun lien d'invitation dans le presse-papiers : copiez le lien "
+                                   "envoye par l'hote, puis cliquez a nouveau.")
+            return {"CANCELLED"}
+        if bpy.data.is_dirty:
+            return context.window_manager.invoke_confirm(self, event)
+        return self.execute(context)
+
+    def execute(self, context):
+        link = invite.parse(self.link or context.window_manager.clipboard or "")
+        if link is None:
+            self.report({"ERROR"}, "Lien d'invitation invalide.")
+            return {"CANCELLED"}
+        return _join_link(self, link, context.window_manager.mp.as_viewer)
+
+
+class MP_OT_copy_invite(bpy.types.Operator):
+    bl_idname = "mp.copy_invite"
+    bl_label = "Copier le lien d'invitation"
+    bl_description = ("Copie un lien prive a envoyer aux joueurs : il contient l'adresse et le mot "
+                      "de passe de la session. Ne le partagez qu'avec les personnes invitees")
+
+    def execute(self, context):
+        s = _s()
+        if s is None or not s.is_host:
+            return {"CANCELLED"}
+        context.window_manager.clipboard = s.invite_link()
+        if s.tunnel is not None and not s.public_address():
+            self.report({"WARNING"}, "Lien copie, mais l'adresse Internet n'est pas encore prete : "
+                                     "il ne marche pour l'instant que sur votre reseau local.")
+        else:
+            self.report({"INFO"}, "Lien d'invitation copie : envoyez-le aux joueurs.")
+        return {"FINISHED"}
+
+
+class MP_OT_check_update(bpy.types.Operator):
+    bl_idname = "mp.check_update"
+    bl_label = "Verifier les mises a jour"
+    bl_description = "Cherche une nouvelle version de l'addon"
+
+    def execute(self, context):
+        if not updater.online_allowed():
+            self.report({"ERROR"}, "Autorisez d'abord l'acces en ligne de Blender.")
+            return {"CANCELLED"}
+        updater.check(auto_install=False)
+        return {"FINISHED"}
+
+
+class MP_OT_install_update(bpy.types.Operator):
+    bl_idname = "mp.install_update"
+    bl_label = "Mettre a jour"
+    bl_description = "Telecharge et installe la nouvelle version de l'addon"
+
+    def execute(self, context):
+        err = updater.install()
+        if err:
+            self.report({"WARNING"}, err)
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Mise a jour en cours...")
         return {"FINISHED"}
 
 
@@ -329,7 +431,8 @@ class MP_OT_sync_frame(bpy.types.Operator):
 classes = (MP_OT_host, MP_OT_join, MP_OT_leave, MP_OT_undo, MP_OT_redo, MP_OT_history_undo,
            MP_OT_history_revert, MP_OT_chat, MP_OT_mark, MP_OT_follow, MP_OT_goto, MP_OT_kick,
            MP_OT_role, MP_OT_checkpoint, MP_OT_restore, MP_OT_resync, MP_OT_open_folder,
-           MP_OT_copy_address, MP_OT_sync_frame)
+           MP_OT_copy_address, MP_OT_sync_frame, MP_OT_join_link, MP_OT_copy_invite,
+           MP_OT_check_update, MP_OT_install_update)
 
 _keymaps = []
 

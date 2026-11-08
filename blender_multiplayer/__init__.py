@@ -6,7 +6,7 @@ Ouvrir la barre laterale de la vue 3D (touche N) > onglet "Multijoueur".
 bl_info = {
     "name": "Blender Multiplayer",
     "author": "Maxence Marrot",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 2, 0),
     "doc_url": "https://github.com/lburdier/blender-multiplayer",
     "location": "Vue 3D > Barre laterale (N) > Multijoueur",
@@ -17,15 +17,16 @@ bl_info = {
 if "bpy" in locals():
     import importlib
     for _m in ("compat", "net", "ids", "payloads", "fingerprint", "serialize", "tracker",
-               "history", "presence", "session", "prefs", "operators", "ui"):
+               "history", "presence", "tunnel", "invite", "session", "updater", "prefs",
+               "operators", "ui"):
         if _m in locals():
             importlib.reload(locals()[_m])
 
 import bpy
 from bpy.app.handlers import persistent
 
-from . import (compat, fingerprint, history, ids, net, operators, payloads, prefs, presence,
-               serialize, session, tracker, ui)
+from . import (compat, fingerprint, history, ids, invite, net, operators, payloads, prefs,
+               presence, serialize, session, tracker, tunnel, ui, updater)
 
 
 @persistent
@@ -71,9 +72,11 @@ def register():
             lst.append(fn)
     if not bpy.app.background:
         operators.register_keymaps()
+    updater.register()
 
 
 def unregister():
+    updater.unregister()
     if session.current is not None:
         try:
             session.current.stop("addon desactive")

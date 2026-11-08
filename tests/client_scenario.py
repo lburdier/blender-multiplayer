@@ -19,7 +19,18 @@ def color():
 try:
     import time
     s = None
+    if T.ONLINE:
+        T.wait_for(lambda: os.path.exists(T.INVITE_FILE), 60, "lien d'invitation")
+        link = T.mp.invite.parse(open(T.INVITE_FILE, encoding="utf-8").read())
+        T.check("lien d'invitation lisible", link is not None and link["password"] == "secret", link)
+        # On ne garde que l'adresse Internet pour tester vraiment le relais.
+        pub = [a for a in link["addresses"] if a[0] == "bore.pub"]
+        T.check("lien avec adresse Internet", len(pub) == 1, link["addresses"])
+        s = session.join_any(pub, link["password"], username="Client")
+        T.log("connecte via", pub)
     for _ in range(40):
+        if s is not None:
+            break
         try:
             s = session.join("127.0.0.1", T.PORT, "secret", username="Client")
             break

@@ -14,6 +14,30 @@ VERSION = tuple(bpy.app.version)
 VERSION_STR = ".".join(str(v) for v in VERSION[:3])
 
 
+def _read_addon_version():
+    """Version de l'addon. Lue dans blender_manifest.toml : une fois installe
+    comme extension, Blender retire bl_info du module."""
+    import re
+    import sys
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blender_manifest.toml")
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                m = re.match(r'version\s*=\s*"([0-9][^"]*)"', line.strip())
+                if m:
+                    return tuple(int(x) for x in re.findall(r"\d+", m.group(1))[:3])
+    except (OSError, ValueError):
+        pass
+    try:
+        return tuple(sys.modules[__package__].bl_info["version"])
+    except Exception:  # noqa: BLE001
+        return (0, 0, 0)
+
+
+ADDON_VERSION = _read_addon_version()
+ADDON_VERSION_STR = ".".join(str(v) for v in ADDON_VERSION)
+
+
 def has_rna_prop(rna_type, name):
     try:
         return name in rna_type.bl_rna.properties

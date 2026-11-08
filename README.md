@@ -54,12 +54,18 @@ Le lien est **privé** : il contient l'adresse de la session et son mot de passe
 
 ## Ce qui est synchronisé
 
-- Objets : création, suppression, transformations, parents, visibilité, modificateurs (Geometry Nodes avec leurs entrées compris), contraintes, emplacements de matériaux, groupes de vertex, pose des armatures, propriétés personnalisées.
+- Objets : création, suppression, transformations (envoyées 60 fois par seconde pendant un déplacement, avec un **glissement fluide** chez les autres au lieu de sauts), parents, visibilité, modificateurs (Geometry Nodes avec leurs entrées compris), contraintes, emplacements de matériaux, groupes de vertex, pose des armatures, propriétés personnalisées.
 - Maillages : géométrie complète et attributs (UV, couleurs, arêtes vives, index de matériau…), **en direct pendant le mode Édition**, avec un aller-retour bit à bit identique.
-- Matériaux, arbres de nodes, mondes, images (le fichier image est transmis), animations (actions 5.x à slots), armatures (os ajoutés en mode Édition), courbes, textes, Grease Pencil, lattices, metaballs, volumes, cheveux, nuages de points, sons, polices… : envoyés en « blob » (data-block complet), donc fidèles à 100 %.
-- Lumières, caméras (dont la mise au point), collections, scènes (réglages de rendu, unités, gestion des couleurs, exclusion de calques).
+- **Textures** :
+  - les fichiers d'image utilisés par la scène sont **envoyés avec elle** à l'arrivée d'un joueur, y compris les tuiles **UDIM**, ainsi que les polices, sons, vidéos, VDB, Alembic et bibliothèques `.blend` liées ;
+  - un fichier de texture **modifié sur le disque** (retouché dans Photoshop, Substance…) est détecté, rechargé et renvoyé à tous automatiquement ;
+  - la **peinture de texture** dans Blender est diffusée pendant que l'on peint, même sans enregistrer l'image (dans les deux sens).
+- Matériaux, arbres de nodes, mondes, animations (actions 5.x à slots), armatures (os ajoutés en mode Édition), courbes, textes, Grease Pencil, lattices, metaballs, volumes, cheveux, nuages de points… : envoyés en « blob » (data-block complet), donc fidèles à 100 %.
+- **Lumières** : tous les paramètres (couleur, puissance, rayon, cône, température, exposition, réglages Cycles…) et leurs **nodes** ; caméras (dont la mise au point) ; collections ; scènes (réglages de sortie : résolution, images/s, fichier ; unités ; gestion des couleurs ; exclusion de calques).
 
-Restent **propres à chaque joueur** : sélection, point de vue, mode, frame courante (partageable par l'hôte avec *Frame partagée*), réglages d'outils.
+Restent **propres à chaque joueur** :
+- les **réglages de rendu** : moteur, échantillons, périphérique (GPU/CPU), débruiteur, performances, réglages Cycles/EEVEE/Workbench. Chacun garde les siens, adaptés à son PC, même en rejoignant une session ;
+- la sélection, le point de vue, le mode, la frame courante (partageable par l'hôte avec *Frame partagée*) et les réglages d'outils.
 
 ## Voir les autres
 
@@ -85,7 +91,10 @@ Sauvegardes (dossier `~/BlenderMultiplayer`, modifiable dans les préférences) 
 - `sessions/<nom>_<date>/autosave/` : autosauvegarde toutes les N minutes (3 par défaut), uniquement s'il y a eu des changements et quand personne n'est en train de manipuler, rotation des N dernières ;
 - `sessions/<nom>_<date>/history.jsonl` + `payloads/` : journal complet de l'historique ;
 - `backups/` : copie automatique avant de rejoindre, de resynchroniser ou de restaurer ;
+- `sessions/<nom>_<date>/archives/` : copies du projet faites avant d'oublier d'anciennes actions (voir ci-dessous) ;
 - `local_backups/` : copies côté joueurs.
+
+**Expiration des anciennes actions** : au-delà de *Actions conservées dans l'historique* (500 par défaut, réglable dans les préférences, 0 = jamais), les actions les plus anciennes expirent : elles ne sont plus annulables, ce qui garde la session légère et fluide. Avant chaque expiration, l'hôte enregistre une **archive** du projet (option *Archiver le projet quand des actions expirent*), et le journal `history.jsonl` garde la trace de toutes les actions : rien n'est perdu.
 
 L'hôte peut **restaurer** n'importe quelle sauvegarde : tous les joueurs sont resynchronisés.
 
@@ -103,7 +112,7 @@ L'hôte peut **restaurer** n'importe quelle sauvegarde : tous les joueurs sont r
 - Si l'**hôte quitte**, la session s'arrête (chacun garde sa scène et ses sauvegardes). Il n'y a pas de migration d'hôte.
 - Le trafic est authentifié par mot de passe (jamais transmis en clair) mais **non chiffré** : avec le relais public, les données de la scène transitent par un serveur tiers (`bore.pub`). Pour un projet confidentiel, utilisez votre propre relais ou un VPN. Ne rejoindre que des hôtes de confiance (les données échangées sont des fichiers .blend ; l'exécution automatique de scripts est désactivée au chargement).
 - Le relais public `bore.pub` est un service gratuit et bénévole : il ajoute de la latence (quelques centaines de ms, sans gêne pour l'édition) et sa disponibilité n'est pas garantie. S'il ne répond pas, le panneau l'indique et réessaie tout seul.
-- Non synchronisés en direct : pixels peints en *Texture Paint* (synchronisés quand l'image est enregistrée/empaquetée), drivers et pistes NLA des objets, ajout de corps rigides/physique par opérateur, séquenceur vidéo, compositing ancien format (4.x).
+- Non synchronisés en direct : peinture sur les images UDIM et les séquences d'images (le fichier enregistré, lui, est bien transmis), images de plus de 4096×4096 pendant la peinture, drivers et pistes NLA des objets, ajout de corps rigides/physique par opérateur, séquenceur vidéo, compositing ancien format (4.x). Les fichiers externes de plus de 96 Mo ne sont pas transmis.
 - Le Ctrl+Z natif reste accessible par le menu *Edit* : en session, il est neutralisé (la scène est remise dans l'état partagé) et un message indique d'utiliser le Ctrl+Z multijoueur.
 - Pour une fidélité parfaite, utilisez la même version de Blender (un avertissement s'affiche sinon). On ne peut pas mélanger **Blender 4.x et Blender 5.x** dans une même session : Blender 5 a changé le format des fichiers, illisible par Blender 4. Le joueur concerné reçoit un message clair.
 
@@ -113,11 +122,12 @@ L'hôte peut **restaurer** n'importe quelle sauvegarde : tous les joueurs sont r
 # Hôte et client Blender en arrière-plan, scénario complet, comparaison des scènes
 python tests/run_integration.py "<blender hôte>" "<blender client>" 57123      # scénario 1
 python tests/run_integration.py "<blender hôte>" "<blender client>" 57124 2    # scénario 2 (types de données)
+python tests/run_integration.py "<blender hôte>" "<blender client>" 57126 3    # scénario 3 (textures, lumières, rendu, fluidité, expiration)
 MP_TEST_ONLINE=1 python tests/run_integration.py "<hôte>" "<client>" 57125     # scénario 1 via le relais Internet et le lien d'invitation
 python tests/run_update_test.py "<blender>" dist/blender_multiplayer-x.y.z.zip  # mise à jour automatique (zip et dépôt distant)
 ```
 
-Le scénario 1 couvre la création et la suppression à distance, les matériaux, le Ctrl+Z partagé, les modifications simultanées, le verrou en mode Édition avec la géométrie en direct, les modificateurs, les collections, les parents, le retour à un point et son annulation, les sauvegardes. Le scénario 2 couvre les lumières, les caméras, l'animation, Geometry Nodes, les images, les courbes, l'armature (pose et os), le texte, Maj+D, les conflits de noms simultanés et l'absence d'opération quand on change de frame.
+Le scénario 1 couvre la création et la suppression à distance, les matériaux, le Ctrl+Z partagé, les modifications simultanées, le verrou en mode Édition avec la géométrie en direct, les modificateurs, les collections, les parents, le retour à un point et son annulation, les sauvegardes. Le scénario 2 couvre les lumières, les caméras, l'animation, Geometry Nodes, les images, les courbes, l'armature (pose et os), le texte, Maj+D, les conflits de noms simultanés et l'absence d'opération quand on change de frame. Le scénario 3 couvre les textures (fichiers externes, tuiles UDIM, fichier modifié sur le disque, peinture dans les deux sens), tous les paramètres et nodes des lumières, l'indépendance des réglages de rendu, le glissement des objets sans écho et l'expiration de l'historique avec archive.
 
 ## Publier une nouvelle version
 

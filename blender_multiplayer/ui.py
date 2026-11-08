@@ -284,7 +284,8 @@ class MP_PT_backups(bpy.types.Panel):
         for mtime, kind, path in s.backups()[:15]:
             row = col.row(align=True)
             when = datetime.datetime.fromtimestamp(mtime).strftime("%d/%m %H:%M:%S")
-            icon = {"checkpoints": "FILE_TICK", "autosave": "TIME"}.get(kind, "FILE_BACKUP")
+            icon = {"checkpoints": "FILE_TICK", "autosave": "TIME",
+                    "archives": "BOOKMARKS"}.get(kind, "FILE_BACKUP")
             row.label(text="%s  %s" % (when, os.path.basename(path)[:28]), icon=icon)
             op = row.operator("mp.restore", text="", icon="FILE_REFRESH")
             op.filepath = path

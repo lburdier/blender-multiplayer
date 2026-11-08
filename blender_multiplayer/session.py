@@ -25,7 +25,7 @@ import traceback
 
 import bpy
 
-from . import compat, history, ids, invite, net, payloads, presence, serialize, tunnel
+from . import compat, history, ids, invite, net, payloads, presence, serialize, smooth, tunnel
 from . import tracker as tracker_mod
 
 current = None
@@ -168,12 +168,21 @@ class BaseSession:
     def tick(self):
         now = time.time()
         try:
+            tr = getattr(self, "tracker", None)
+            if tr is not None and tr.smoother.items:
+                tr.smoother.step(now)   # en plus du minuteur a 60 i/s (filet de securite)
             self._tick(now)
         except Exception:  # noqa: BLE001
             self.log("erreur: " + traceback.format_exc())
         if current is not self:
             return None
-        return 0.03 if self.active else 0.1
+        if not self.active:
+            return 0.1
+        # Cadence adaptative : 60 Hz pendant qu'un objet bouge (chez soi ou chez
+        # les autres), 30 Hz sinon.
+        tr = getattr(self, "tracker", None)
+        busy = (tr is not None and bool(tr.smoother.items)) or now - self.last_change_t < 0.6
+        return 0.016 if busy else 0.03
 
     def _tick(self, now):
         raise NotImplementedError
@@ -274,6 +283,10 @@ class BaseSession:
 
     def stop(self, reason=""):
         global current, last_reason
+        try:
+            smooth.stop_all()
+        except Exception:  # noqa: BLE001
+            pass
         self.active = False
         self.state = "closed"
         self.closed_reason = reason
@@ -442,6 +455,7 @@ class HostSession(BaseSession):
         self._enforce_locks()
         self._autosave_tick(now)
         self._tunnel_tick()
+        self._expire_tick(now)
         if now - self.flush_t > 3.0:
             self.flush_t = now
             if self.history is not None and self.history._unflushed is not None \
@@ -574,6 +588,7 @@ class HostSession(BaseSession):
         client = self.clients.get(cid)
         if conn is None or client is None:
             return
+        self.tracker.smoother.finish_all()
         changes = self.tracker.collect()
         if changes:
             self.commit(self.me, changes, history.describe(changes, None, self.tracker.known),
@@ -586,10 +601,70 @@ class HostSession(BaseSession):
             os.remove(path)
         except OSError:
             pass
+        ext, parts = self._snapshot_extras()
+        extra = sum(len(p) for p in parts)
         conn.send({"type": "snapshot", "seq": self.msg_seq, "name": self.session_name,
-                   "size": len(data)}, data)
+                   "size": len(data) + extra, "blend_len": len(data), "ext": ext},
+                  data + b"".join(parts) if parts else data)
         client["ready"] = True
-        self.log("instantane envoye (%d Ko) au client %s" % (len(data) // 1024, cid))
+        self.log("instantane envoye au client %s : scene %d Ko + %d fichier(s)/texture(s) %d Ko" % (
+            cid, len(data) // 1024, len(ext), extra // 1024))
+
+    def _snapshot_extras(self):
+        """Ce que le .blend ne contient pas : fichiers externes (textures, tuiles
+        UDIM, polices, sons, videos, VDB, Alembic), bibliotheques liees et pixels
+        des textures peintes non enregistrees."""
+        ext, parts = [], []
+        budget = [2 * 1024 ** 3]
+
+        def add(item, blob):
+            if len(blob) > budget[0]:
+                return
+            budget[0] -= len(blob)
+            item["len"] = len(blob)
+            ext.append(item)
+            parts.append(blob)
+
+        def read(path):
+            try:
+                if os.path.getsize(path) <= serialize.MAX_ATTACHED_FILE:
+                    with open(path, "rb") as fh:
+                        return fh.read()
+            except OSError:
+                pass
+            return None
+
+        for attr in serialize.FILE_ATTRS:
+            for idb in getattr(bpy.data, attr, ()):
+                uid = ids.get_uid(idb)
+                if not uid:
+                    continue
+                for path, tile in serialize.external_files(idb):
+                    blob = read(path)
+                    if blob is not None:
+                        item = {"k": "file", "u": uid, "a": attr, "fn": os.path.basename(path)}
+                        if tile is not None:
+                            item["tile"] = tile
+                            item["pat"] = os.path.basename(bpy.path.abspath(idb.filepath))
+                        add(item, blob)
+        for lib in bpy.data.libraries:
+            try:
+                path = bpy.path.abspath(lib.filepath)
+            except Exception:  # noqa: BLE001
+                continue
+            blob = read(path) if os.path.isfile(path) else None
+            if blob is not None:
+                add({"k": "lib", "n": lib.name, "fn": os.path.basename(path)}, blob)
+        for img in bpy.data.images:
+            uid = ids.get_uid(img)
+            try:
+                if uid and img.is_dirty and serialize.pixels_supported(img):
+                    blob, meta = serialize.image_pixels(img)
+                    meta.update(k="px", u=uid)
+                    add(meta, blob)
+            except Exception as exc:  # noqa: BLE001
+                self.log("pixels %s: %s" % (img.name, exc))
+        return ext, parts
 
     def _send_state(self, conn, uids):
         states = {}
@@ -919,10 +994,51 @@ class HostSession(BaseSession):
             return
         self.autosave()
 
+    def _expire_tick(self, now):
+        """Fait expirer les plus anciennes actions au-dela de la limite reglee,
+        par lots, en archivant d'abord le projet."""
+        if now - getattr(self, "_expire_t", 0.0) < 5.0 or self.history is None:
+            return
+        self._expire_t = now
+        p = _prefs()
+        limit = int(getattr(p, "history_limit", 500))
+        if limit <= 0:
+            return
+        batch = max(10, limit // 10)
+        if len(self.history.entries) < limit + batch:
+            return
+        if now - self.last_change_t < 1.5:
+            return   # quelqu'un manipule : on attend un moment calme
+        archive = ""
+        if getattr(p, "archive_on_expire", True):
+            archive = self.archive()
+        n, upto = self.history.expire(limit)
+        if n:
+            for s in [s for s in self.hist if s <= upto]:
+                self.hist.pop(s, None)
+            self.broadcast({"type": "hist_expire", "upto": upto})
+            self.log("%d actions anciennes expirees (jusqu'a #%d)%s" % (
+                n, upto, (", archive " + os.path.basename(archive)) if archive else ""))
+            compat.tag_redraw()
+
+    def archive(self):
+        folder = os.path.join(self.session_dir, "archives")
+        path = os.path.join(folder, "archive_%05d_%s.blend" % (self.history.seq, _stamp()))
+        try:
+            self.tracker.smoother.finish_all()
+            compat.save_copy(path)
+            _rotate(folder, max(_prefs().max_backups, 5))
+            self.history.flush()
+            return path
+        except Exception as exc:  # noqa: BLE001
+            self.log("archive: %s" % exc)
+            return ""
+
     def autosave(self):
         folder = os.path.join(self.session_dir, "autosave")
         path = os.path.join(folder, "autosave_%s.blend" % _stamp())
         try:
+            self.tracker.smoother.finish_all()
             compat.save_copy(path)
             _rotate(folder, _prefs().max_backups)
             self.autosave_t = time.time()
@@ -949,7 +1065,7 @@ class HostSession(BaseSession):
 
     def backups(self):
         out = []
-        for sub in ("checkpoints", "autosave", "backups"):
+        for sub in ("checkpoints", "autosave", "archives", "backups"):
             folder = os.path.join(self.session_dir, sub)
             if not os.path.isdir(folder):
                 continue
@@ -1200,6 +1316,10 @@ class ClientSession(BaseSession):
         elif t == "hist":
             for s in msg.get("h", []):
                 self._update_hist(s)
+        elif t == "hist_expire":
+            upto = msg.get("upto", 0)
+            for s in [s for s in self.hist if s <= upto]:
+                self.hist.pop(s, None)
         elif t == "presence":
             user = self.users.get(msg.get("u"))
             if user is not None:
@@ -1280,8 +1400,16 @@ class ClientSession(BaseSession):
             except Exception as exc:  # noqa: BLE001
                 self.log("sauvegarde avant synchro: %s" % exc)
         path = os.path.join(self.session_dir, "%s.blend" % _safe(self.session_name or "session"))
+        blend_len = msg.get("blend_len", len(binary))
         with open(path, "wb") as fh:
-            fh.write(binary)
+            fh.write(binary[:blend_len])
+        # Les reglages de rendu restent ceux de ce PC (moteur, echantillons, GPU...).
+        local_render = None
+        try:
+            if bpy.context.scene is not None:
+                local_render = serialize.capture_local_render(bpy.context.scene)
+        except Exception as exc:  # noqa: BLE001
+            self.log("reglages de rendu locaux: %s" % exc)
         self.loading = True
         try:
             compat.open_file(path)
@@ -1289,13 +1417,84 @@ class ClientSession(BaseSession):
             self.loading = False
         self.tracker = tracker_mod.Tracker(self)
         self.tracker.sync_frame = self.sync_frame
+        px = self._apply_snapshot_extras(msg.get("ext") or [], binary, blend_len)
+        if local_render:
+            for sc in bpy.data.scenes:
+                serialize.restore_local_render(sc, local_render, self.tracker)
         self.tracker.init_known(write_blobs=False)
+        self.tracker.px_known.update(px)
         self.pending.clear()
         self.snap_seq = msg.get("seq", 0)
         self.active = True
         self.state = "ready"
         self.toast("Scene synchronisee (%d Ko). Bonne session !" % (len(binary) // 1024), (0.5, 1, 0.5))
         compat.tag_redraw()
+
+    def _apply_snapshot_extras(self, ext, binary, offset):
+        """Installe les fichiers externes et les pixels envoyes avec la scene."""
+        folder = self.assets_dir()
+        by_uid = {}
+        for attr in serialize.FILE_ATTRS:
+            for idb in getattr(bpy.data, attr, ()):
+                u = ids.get_uid(idb)
+                if u:
+                    by_uid[u] = idb
+        reload, px = [], {}
+        for item in ext:
+            size = int(item.get("len", 0))
+            blob = binary[offset:offset + size]
+            offset += size
+            try:
+                kind = item.get("k")
+                if kind == "file":
+                    idb = by_uid.get(item.get("u"))
+                    if idb is None:
+                        continue
+                    if item.get("tile") is not None:
+                        sub = os.path.join(folder, "udim_%s" % item["u"])
+                        os.makedirs(sub, exist_ok=True)
+                        with open(os.path.join(sub, item["fn"]), "wb") as fh:
+                            fh.write(blob)
+                        new = os.path.join(sub, item.get("pat") or item["fn"])
+                    else:
+                        new = os.path.join(folder, "%s_%s" % (payloads.sha(blob)[:10], item["fn"]))
+                        if not os.path.exists(new):
+                            with open(new, "wb") as fh:
+                                fh.write(blob)
+                    if idb.filepath != new:
+                        idb.filepath = new
+                    if idb not in reload:
+                        reload.append(idb)
+                elif kind == "lib":
+                    lib = bpy.data.libraries.get(item.get("n", ""))
+                    if lib is None:
+                        continue
+                    sub = os.path.join(folder, "libs")
+                    os.makedirs(sub, exist_ok=True)
+                    new = os.path.join(sub, item["fn"])
+                    with open(new, "wb") as fh:
+                        fh.write(blob)
+                    lib.filepath = new
+                    lib.reload()
+                elif kind == "px":
+                    img = by_uid.get(item.get("u"))
+                    if img is None:
+                        continue
+                    key = self.store.put(blob)
+                    serialize.apply_pixels(img, {"w": item["w"], "h": item["h"], "c": item["c"],
+                                                 "fmt": item.get("fmt"), "px": {"$p": key}}, self.tracker)
+                    px[item["u"]] = key
+            except Exception as exc:  # noqa: BLE001
+                self.log("fichier joint %s: %s" % (item.get("fn") or item.get("u"), exc))
+        for idb in reload:
+            try:
+                if hasattr(idb, "reload"):
+                    idb.reload()
+            except Exception:  # noqa: BLE001
+                pass
+        if ext:
+            self.log("%d fichier(s)/texture(s) recu(s) avec la scene" % len(ext))
+        return px
 
     # ------------------------------------------------------------------
     def send_chat(self, text):

@@ -16,7 +16,7 @@ import threading
 import time
 import zlib
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 MAGIC = b"BMP3"
 _HDR = struct.Struct("!4sBIQQ")  # magic, flags, json_len, bin_len, body_len
 FLAG_ZLIB = 1

@@ -18,7 +18,7 @@ import time
 
 from . import ids, payloads
 
-MAX_ENTRIES = 5000
+MAX_ENTRIES = 100000   # garde-fou absolu ; la limite reglable est history_limit
 MERGE_WINDOW = 1.2
 
 KIND_LABELS = {"op": "", "undo": "Annuler", "redo": "Retablir", "revert": "Retour",
@@ -61,6 +61,10 @@ def describe(changes, op_label=None, known=None):
         fields.update((c.get("f") or {}).keys())
     if fields and fields <= _TRANSFORM:
         verb = "Transformation"
+    elif "_px" in fields:
+        verb = "Peinture de texture"
+    elif "fsig" in fields:
+        verb = "Texture mise a jour"
     elif "geom" in fields or ("fp" in fields and any(c["t"] == "meshes" for c in changes)):
         verb = "Edition du maillage"
     elif "_mods" in fields:
@@ -156,6 +160,25 @@ class History:
             old = self.entries.pop(0)
             self.by_seq.pop(old["seq"], None)
         return entry, False
+
+    def expire(self, limit):
+        """Oublie les actions les plus anciennes au-dela de `limit` (0 = jamais).
+
+        Elles restent dans le journal history.jsonl sur le disque mais ne sont
+        plus annulables : la memoire et les listes restent legeres. Retourne
+        (nombre oublie, numero de la derniere action oubliee)."""
+        if limit <= 0 or len(self.entries) <= limit:
+            return 0, 0
+        self.flush()
+        n = len(self.entries) - limit
+        gone = self.entries[:n]
+        del self.entries[:n]
+        for e in gone:
+            self.by_seq.pop(e["seq"], None)
+        gone_seqs = {e["seq"] for e in gone}
+        for user in list(self.redo):
+            self.redo[user] = [s for s in self.redo[user] if s not in gone_seqs]
+        return n, gone[-1]["seq"]
 
     # ------------------------------------------------------------------
     def last_undoable(self, user):

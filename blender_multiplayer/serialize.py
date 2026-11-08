@@ -891,10 +891,21 @@ def read_generic_id(idb, ctx, deep=True):
     f["name"] = idb.name
     f["_props"] = read_idprops(idb, rna=idb)
     f["_anim"] = read_anim(idb)
+    nt = getattr(idb, "node_tree", None)
+    if deep and nt is not None and isinstance(idb, bpy.types.Light):
+        # Noeuds de la lumiere (Cycles : IES, corps noir...) : envoyes en bloc
+        # complet quand ils changent.
+        try:
+            f["_mode"] = "b"
+            f["fp"] = fingerprint.fingerprint(nt)
+        except Exception:  # noqa: BLE001
+            f.pop("_mode", None)
     return f
 
 
 def apply_generic_field(idb, k, v, ctx):
+    if k in ("_mode", "fp"):
+        return
     if k == "name":
         if idb.name != v:
             idb.name = v
@@ -982,14 +993,61 @@ SCENE_SKIP = frozenset((
     "safe_areas", "display", "shading", "grease_pencil_settings", "hydra",
 ))
 
+# Reglages de RENDU : propres a chaque joueur (moteur, echantillons, peripherique,
+# debruiteur, performances...) car ils dependent du PC. Seuls les reglages de
+# SORTIE (resolution, images/s, fichier de sortie...), les unites et la gestion
+# des couleurs (le "look" du projet) sont partages.
 _SCENE_SUBS = (
-    ("_render", "render", 1, ("views", "stereo_views", "use_lock_interface")),
     ("_unit", "unit_settings", 0, ()),
-    ("_eevee", "eevee", 0, ()),
-    ("_cycles", "cycles", 0, ()),
     ("_view", "view_settings", 0, ()),
     ("_display", "display_settings", 0, ()),
 )
+
+OUTPUT_PREFIXES = ("resolution_", "pixel_aspect", "fps", "frame_map", "filepath", "use_file_extension",
+                   "use_overwrite", "use_placeholder", "image_settings", "ffmpeg", "border_",
+                   "use_border", "use_crop_to_border", "stamp", "use_stamp", "metadata_input",
+                   "use_multiview", "views_format", "use_single_layer")
+
+# Reglages de rendu restaures chez le joueur apres reception de la scene de l'hote.
+LOCAL_RENDER_SUBS = ("cycles", "eevee", "display", "hydra")
+
+
+def _is_output_key(k):
+    return k.startswith(OUTPUT_PREFIXES)
+
+
+def read_output(scene):
+    full = read_struct(scene.render, depth=1, skip=("views", "stereo_views"))
+    return {k: v for k, v in full.items() if _is_output_key(k)}
+
+
+def capture_local_render(scene):
+    """Reglages de rendu propres a ce PC (pour les garder en rejoignant une session)."""
+    out = {}
+    try:
+        full = read_struct(scene.render, depth=1, skip=("views", "stereo_views"))
+        out["render"] = {k: v for k, v in full.items() if not _is_output_key(k)}
+    except Exception:  # noqa: BLE001
+        pass
+    for attr in LOCAL_RENDER_SUBS:
+        sub = getattr(scene, attr, None)
+        if sub is not None:
+            try:
+                out[attr] = read_struct(sub, depth=1)
+            except Exception:  # noqa: BLE001
+                pass
+    return out
+
+
+def restore_local_render(scene, saved, ctx):
+    for attr, values in (saved or {}).items():
+        sub = scene.render if attr == "render" else getattr(scene, attr, None)
+        if sub is None:
+            continue
+        try:
+            apply_struct(sub, values, ctx)
+        except Exception as exc:  # noqa: BLE001
+            ctx.log("reglages de rendu locaux (%s): %s" % (attr, exc))
 
 
 def _read_layers(scene):
@@ -1072,6 +1130,10 @@ def read_scene(scene, ctx, deep=True):
                 f[key] = read_struct(sub, depth=depth, skip=sub_skip)
             except Exception:
                 pass
+    try:
+        f["_output"] = read_output(scene)
+    except Exception:  # noqa: BLE001
+        pass
     f["_children"] = _uids(scene.collection.children)
     f["_objects"] = _uids(scene.collection.objects)
     f["_layers"] = _read_layers(scene)
@@ -1101,6 +1163,11 @@ def apply_scene_field(scene, k, v, ctx):
     if k == "_props":
         apply_idprops(scene, v, ctx)
         return
+    if k == "_output":
+        apply_struct(scene.render, {kk: vv for kk, vv in v.items() if _is_output_key(kk)}, ctx)
+        return
+    if k in ("_render", "_cycles", "_eevee"):
+        return  # anciens champs (versions < 1.2) : reglages de rendu non partages
     for key, attr, _depth, _skip in _SCENE_SUBS:
         if k == key:
             sub = getattr(scene, attr, None)
@@ -1119,11 +1186,97 @@ def apply_scene_field(scene, k, v, ctx):
 MAX_ATTACHED_FILE = 96 * 1024 * 1024
 
 
+FILE_ATTRS = ("images", "fonts", "sounds", "movieclips", "volumes", "cache_files")
+
+
+def external_files(idb):
+    """Fichiers externes utilises par un data-block : [(chemin, numero de tuile)]."""
+    if getattr(idb, "packed_file", None) is not None or getattr(idb, "library", None) is not None:
+        return []
+    fp = getattr(idb, "filepath", "") or ""
+    if not fp:
+        return []
+    try:
+        path = bpy.path.abspath(fp)
+    except Exception:  # noqa: BLE001
+        return []
+    if isinstance(idb, bpy.types.Image) and idb.source == "TILED" and "<UDIM>" in path:
+        out = []
+        for tile in idb.tiles:
+            p = path.replace("<UDIM>", str(tile.number))
+            if os.path.isfile(p):
+                out.append((p, tile.number))
+        return out
+    if isinstance(idb, bpy.types.Image) and idb.source not in ("FILE", "MOVIE"):
+        return []
+    return [(path, None)] if os.path.isfile(path) else []
+
+
+def file_signature(idb):
+    sig = []
+    for path, tile in external_files(idb):
+        try:
+            st = os.stat(path)
+            sig.append([tile, int(st.st_mtime * 1000), st.st_size])
+        except OSError:
+            pass
+    return sig or None
+
+
 def read_blob_id(idb, ctx, deep=True):
     f = {"name": idb.name}
     if deep:
         f["fp"] = fingerprint.fingerprint(idb)
+        if isinstance(idb, (bpy.types.Image, bpy.types.VectorFont, bpy.types.Sound,
+                            bpy.types.MovieClip)) or type(idb).__name__ in ("Volume", "CacheFile"):
+            f["fsig"] = file_signature(idb)
     return f
+
+
+MAX_PIXELS = 4096 * 4096
+
+
+def pixels_supported(img):
+    try:
+        w, h = img.size
+    except Exception:  # noqa: BLE001
+        return False
+    # Les images creees dans Blender (celles que l'on peint) sont de type UV_TEST.
+    return (img.type in ("IMAGE", "UV_TEST") and img.source in ("FILE", "GENERATED") and w * h > 0
+            and w * h <= MAX_PIXELS and img.library is None)
+
+
+def image_pixels(img):
+    """(octets, meta) des pixels d'une image, en 8 bits (ou 16 bits flottants pour le HDR)."""
+    w, h = img.size
+    ch = img.channels
+    arr = np.empty(w * h * ch, dtype=np.float32)
+    img.pixels.foreach_get(arr)
+    if img.is_float:
+        return arr.astype(np.float16).tobytes(), {"w": w, "h": h, "c": ch, "fmt": "f16"}
+    data = (np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8).tobytes()
+    return data, {"w": w, "h": h, "c": ch, "fmt": "u8"}
+
+
+def apply_pixels(img, v, ctx):
+    if not v:
+        return
+    key = v["px"]["$p"]
+    data = ctx.store.get(key)
+    if data is None:
+        raise MissingPayload(key)
+    w, h, ch = int(v["w"]), int(v["h"]), int(v["c"])
+    if tuple(img.size) != (w, h):
+        img.scale(w, h)
+    if img.channels != ch:
+        ctx.log("image %s : canaux differents (%d/%d), pixels ignores" % (img.name, img.channels, ch))
+        return
+    if v.get("fmt") == "f16":
+        arr = np.frombuffer(data, dtype=np.float16).astype(np.float32)
+    else:
+        arr = np.frombuffer(data, dtype=np.uint8).astype(np.float32) * (1.0 / 255.0)
+    img.pixels.foreach_set(arr)
+    img.update()
 
 
 def write_blob(idb, attr, ctx):
@@ -1138,20 +1291,32 @@ def write_blob(idb, attr, ctx):
         pass
     meta = {"name": idb.name, "attr": attr}
     fields = {}
-    filepath = getattr(idb, "filepath", None)
-    packed = getattr(idb, "packed_file", None)
-    if filepath and packed is None and attr in ("images", "fonts", "sounds", "movieclips",
-                                                "volumes", "cache_files"):
-        try:
-            abspath = bpy.path.abspath(filepath)
-            if os.path.isfile(abspath) and os.path.getsize(abspath) <= MAX_ATTACHED_FILE:
-                with open(abspath, "rb") as fh:
-                    fdata = fh.read()
-                fsha = ctx.store.put(fdata)
-                fields["file"] = {"$p": fsha}
-                meta["fname"] = os.path.basename(abspath)
-        except Exception:
-            pass
+    if attr in FILE_ATTRS:
+        files = external_files(idb)
+        if files and files[0][1] is not None:
+            # Image UDIM : une piece jointe par tuile.
+            tiles = []
+            for path, number in files:
+                try:
+                    if os.path.getsize(path) <= MAX_ATTACHED_FILE:
+                        with open(path, "rb") as fh:
+                            tiles.append({"$p": ctx.store.put(fh.read())})
+                        meta.setdefault("tiles", []).append([number, os.path.basename(path)])
+                except OSError:
+                    pass
+            if tiles:
+                fields["tiles"] = tiles
+                meta["pattern"] = os.path.basename(bpy.path.abspath(idb.filepath))
+        elif files:
+            abspath = files[0][0]
+            try:
+                if os.path.getsize(abspath) <= MAX_ATTACHED_FILE:
+                    with open(abspath, "rb") as fh:
+                        fdata = fh.read()
+                    fields["file"] = {"$p": ctx.store.put(fdata)}
+                    meta["fname"] = os.path.basename(abspath)
+            except OSError:
+                pass
     data = payloads.pack(meta, raw=raw)
     key = ctx.store.put(data)
     fields["blob"] = {"$p": key}
@@ -1174,6 +1339,13 @@ def apply_blob(attr, uid, fields, existing, ctx):
         raise MissingPayload(bref["$p"] if bref else "?")
     if existing is not None and getattr(existing, "is_editmode", False):
         raise Locked(existing.name)
+    # Chemin d'origine du fichier externe : garde si le contenu recu est identique
+    # (evite de remplacer les chemins de l'hote par des copies).
+    orig_path = None
+    if existing is not None and attr in FILE_ATTRS:
+        files = external_files(existing)
+        if len(files) == 1 and files[0][1] is None:
+            orig_path = (existing.filepath, files[0][0])
     meta, _arrays, raw = payloads.unpack(data)
     blob_name = meta["name"]
     blob_attr = meta.get("attr", attr)
@@ -1228,17 +1400,41 @@ def apply_blob(attr, uid, fields, existing, ctx):
     if fref and hasattr(target, "filepath"):
         fdata = ctx.store.get(fref["$p"])
         if fdata is not None:
-            fname = meta.get("fname") or (target.name + ".bin")
-            local = os.path.join(ctx.assets_dir(), "%s_%s" % (fref["$p"][:10], fname))
-            if not os.path.exists(local):
-                with open(local, "wb") as fh:
-                    fh.write(fdata)
+            keep = None
+            if orig_path is not None:
+                try:
+                    with open(orig_path[1], "rb") as fh:
+                        if payloads.sha(fh.read()) == fref["$p"]:
+                            keep = orig_path[0]
+                except OSError:
+                    pass
+            if keep is None:
+                fname = meta.get("fname") or (target.name + ".bin")
+                local = os.path.join(ctx.assets_dir(), "%s_%s" % (fref["$p"][:10], fname))
+                if not os.path.exists(local):
+                    with open(local, "wb") as fh:
+                        fh.write(fdata)
+                keep = local
             try:
-                target.filepath = local
+                if target.filepath != keep:
+                    target.filepath = keep
                 if hasattr(target, "reload"):
                     target.reload()
             except Exception:
                 pass
+    if fields.get("tiles") and meta.get("tiles") and hasattr(target, "filepath"):
+        folder = os.path.join(ctx.assets_dir(), "udim_%s" % uid)
+        os.makedirs(folder, exist_ok=True)
+        for ref_, (number, fname) in zip(fields["tiles"], meta["tiles"]):
+            tdata = ctx.store.get(ref_["$p"])
+            if tdata is not None:
+                with open(os.path.join(folder, fname), "wb") as fh:
+                    fh.write(tdata)
+        try:
+            target.filepath = os.path.join(folder, meta.get("pattern") or "tile.<UDIM>.png")
+            target.reload()
+        except Exception:
+            pass
     for lib in list(bpy.data.libraries):
         if lib.as_pointer() not in libs_before:
             try:
@@ -1273,7 +1469,7 @@ def read(attr, idb, ctx, deep=True):
 
 
 def is_deep_field(attr, k):
-    return k in ("fp", "geom", "blob", "_mode", "_hidden", "file")
+    return k in ("fp", "geom", "blob", "_mode", "_hidden", "file", "fsig", "tiles")
 
 
 def apply_field(attr, idb, k, v, ctx):
@@ -1290,13 +1486,16 @@ def apply_field(attr, idb, k, v, ctx):
     else:
         if k == "name" and idb.name != v:
             idb.name = v
+        elif k == "_px" and isinstance(idb, bpy.types.Image):
+            apply_pixels(idb, v, ctx)
+        # "fsig" (signature du fichier) est informatif
 
 
 def apply_fields(attr, uid, idb, fields, ctx):
     """Applique les champs ; retourne le data-block (il peut avoir ete remplace)."""
     if "blob" in fields:
         idb = apply_blob(attr, uid, fields, idb, ctx)
-        rest = {k: v for k, v in fields.items() if k not in ("blob", "fp", "file", "name")}
+        rest = {k: v for k, v in fields.items() if k not in ("blob", "fp", "file", "name", "tiles")}
     else:
         rest = fields
     order = sorted(rest.keys(), key=lambda k: (0 if k == "name" else 1 if k == "data" else 2))

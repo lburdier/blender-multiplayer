@@ -48,6 +48,17 @@ class MP_AddonPreferences(bpy.types.AddonPreferences):
                           description="Relais TCP compatible bore utilise pour rendre la session "
                                       "joignable par Internet (bore.pub est public et gratuit ; "
                                       "vous pouvez heberger le votre avec 'bore server')")
+    history_limit: IntProperty(name="Actions conservees dans l'historique", default=500, min=0,
+                               max=100000,
+                               description="Au-dela, les actions les plus anciennes expirent (plus "
+                                           "annulables) pour garder la session fluide. 0 = jamais")
+    archive_on_expire: BoolProperty(name="Archiver le projet quand des actions expirent", default=True,
+                                    description="L'hote enregistre une copie du projet (dossier "
+                                                "archives) avant d'oublier des actions : rien n'est "
+                                                "perdu")
+    smooth_motion: BoolProperty(name="Deplacements fluides", default=True,
+                                description="Les objets deplaces par les autres glissent au lieu de "
+                                            "sauter d'une position a l'autre")
     check_updates: BoolProperty(name="Verifier les mises a jour au demarrage", default=True)
     auto_update: BoolProperty(name="Installer automatiquement les mises a jour", default=True,
                               description="Installe la nouvelle version au demarrage de Blender "
@@ -67,9 +78,12 @@ class MP_AddonPreferences(bpy.types.AddonPreferences):
         box.prop(self, "max_backups")
         box.prop(self, "local_backup")
         box.prop(self, "backup_before_join")
+        box.prop(self, "history_limit")
+        box.prop(self, "archive_on_expire")
         box = layout.box()
         box.label(text="Comportement et affichage", icon="OVERLAY")
         box.prop(self, "override_undo")
+        box.prop(self, "smooth_motion")
         grid = box.grid_flow(columns=3)
         for p in ("show_avatars", "show_names", "show_selection", "show_cursors", "show_toasts"):
             grid.prop(self, p)
@@ -104,6 +118,9 @@ class _Defaults:
     show_cursors = True
     show_toasts = True
     relay = "bore.pub:7835"
+    history_limit = 500
+    archive_on_expire = True
+    smooth_motion = True
     check_updates = True
     auto_update = True
 

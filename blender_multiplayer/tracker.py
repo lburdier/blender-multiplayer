@@ -11,7 +11,7 @@ import time
 
 import bpy
 
-from . import compat, ids, serialize
+from . import compat, ids, payloads, serialize, smooth
 
 
 class Tracker:
@@ -46,6 +46,15 @@ class Tracker:
         self.sync_frame = False
         self.edit_interval = 0.3
         self.blob_interval = 0.25
+        self.px_known = {}     # uid image -> empreinte des derniers pixels synchronises
+        self.px_state = {}     # uid image -> [empreinte vue, heure d'envoi, heure de lecture]
+        self.px_t = 0.0
+        self.smoother = smooth.Smoother(self)
+        try:
+            from . import prefs
+            self.smoother.enabled = bool(getattr(prefs.get(), "smooth_motion", True))
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # Interface utilisee par serialize (ctx)
@@ -393,6 +402,8 @@ class Tracker:
                 self.log("lecture %s: %s" % (attr, exc))
                 continue
             kf = self.known[uid]["f"]
+            for k in self.smoother.fields_of(uid):
+                cur.pop(k, None)   # en train de glisser vers la valeur connue
             passive = serialize.PASSIVE_FIELDS
             if mode != "blob" and attr != "meshes":
                 anim = self.animated_fields(idb)
@@ -411,8 +422,16 @@ class Tracker:
             if not diff:
                 continue
             try:
-                if (mode == "blob" and "fp" in diff) or \
-                        (attr == "meshes" and cur.get("_mode") == "b" and ("fp" in diff or "_mode" in diff)):
+                if attr == "images" and "fsig" in diff and kf.get("fsig") is not None:
+                    # Fichier de texture modifie sur le disque : on le recharge ici
+                    # (sauf retouches non enregistrees) et on l'envoie a tous.
+                    try:
+                        if not idb.is_dirty:
+                            idb.reload()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if (mode == "blob" and ("fp" in diff or "fsig" in diff)) or \
+                        (cur.get("_mode") == "b" and ("fp" in diff or "_mode" in diff)):
                     if not self._with_blob(uid, attr, idb, diff, now):
                         keep_dirty[uid] = flags
                         continue
@@ -421,11 +440,66 @@ class Tracker:
                 continue
             changes.append({"u": uid, "t": attr, "k": "u", "f": diff})
         self.dirty.update(keep_dirty)
+        # Pixels des textures peintes (non enregistrees)
+        changes.extend(self._collect_pixels(now))
         # 3. Suppressions
         for uid in [u for u in self.known if u not in self.index]:
             k = self.known[uid]
             changes.append({"u": uid, "t": k["t"], "k": "d", "n": k["f"].get("name", "")})
         return changes
+
+    def _collect_pixels(self, now):
+        if now - self.px_t < 0.25:
+            return []
+        self.px_t = now
+        out = []
+        for uid, idb in list(self.index.items()):
+            if self.attr_of.get(uid) != "images" or uid not in self.known:
+                continue
+            try:
+                if not idb.is_dirty or not serialize.pixels_supported(idb):
+                    continue
+                w, h = idb.size
+            except ReferenceError:
+                continue
+            st = self.px_state.setdefault(uid, [None, 0.0, 0.0])
+            if now - st[2] < (0.4 if w * h <= 2048 * 2048 else 1.2):
+                continue
+            st[2] = now
+            try:
+                data, meta = serialize.image_pixels(idb)
+            except Exception as exc:  # noqa: BLE001
+                self.log("pixels %s: %s" % (idb.name, exc))
+                continue
+            key = payloads.sha(data)
+            stable = key == st[0]
+            st[0] = key
+            if key == self.px_known.get(uid):
+                continue
+            # Pendant la peinture : au plus un envoi toutes les 1,5 s ; des que
+            # l'image ne bouge plus, envoi immediat.
+            if not stable and now - st[1] < 1.5:
+                continue
+            st[1] = now
+            self.store.put(data, key=key)
+            self.px_known[uid] = key
+            meta["px"] = {"$p": key}
+            out.append({"u": uid, "t": "images", "k": "u", "f": {"_px": meta}})
+        return out
+
+    def settle(self, uid):
+        """Fin d'un glissement : l'etat reel devient l'etat connu (arrondis inclus)."""
+        idb = self.resolve(uid)
+        entry = self.known.get(uid)
+        if idb is None or entry is None:
+            return
+        try:
+            cur = serialize.read(entry["t"], idb, self, deep=False)
+        except Exception:  # noqa: BLE001
+            return
+        for k in smooth.FIELDS:
+            if k in cur:
+                entry["f"][k] = cur[k]
 
     def mark_sent(self, changes):
         """Les changements envoyes deviennent l'etat connu."""
@@ -459,9 +533,16 @@ class Tracker:
             for k in set(fields) | {"name"}:
                 if k in cur:
                     kf[k] = cur[k]
-        for k in ("blob", "file"):
+        for k in ("blob", "file", "tiles"):
             if k in fields:
                 entry["f"][k] = fields[k]
+        px = fields.get("_px")
+        if px:
+            entry["f"]["_px"] = px
+            try:
+                self.px_known[uid] = px["px"]["$p"]
+            except (KeyError, TypeError):
+                pass
         want = fields.get("name")
         if want and not self.session.is_host and cur.get("name") and cur["name"] != want:
             # Nom pris localement (ex: deux joueurs creent "Cube" en meme temps) :
@@ -498,6 +579,7 @@ class Tracker:
         updates = sorted([c for c in changes if c["k"] == "u"], key=lambda c: ids.order_of(c["t"]))
         deletes = sorted([c for c in changes if c["k"] == "d"], key=lambda c: -ids.order_of(c["t"]))
         applied = []
+        glides = []
         rescan = bool(creates or deletes)
         for c in creates + updates:
             uid, attr, f = c["u"], c["t"], c.get("f", {})
@@ -511,6 +593,14 @@ class Tracker:
                     serialize.create(attr, uid, f, self)
                     created = True
                 else:
+                    targets = {}
+                    if attr == "objects" and self.smoother.enabled and idb.mode == "OBJECT":
+                        targets = {k: v for k, v in f.items() if k in smooth.FIELDS}
+                    if targets:
+                        taken = self.smoother.add(uid, idb, targets)
+                        if taken:
+                            glides.append((uid, {k: targets[k] for k in taken}))
+                            f = {k: v for k, v in f.items() if k not in taken}
                     serialize.apply_fields(attr, uid, idb, f, self)
                 self.tombstones.discard(uid)
                 applied.append((uid, attr, f, created))
@@ -542,6 +632,10 @@ class Tracker:
             self.scan()
         for uid, attr, f, created in applied:
             self.accept(uid, attr, f, created)
+        for uid, targets in glides:
+            entry = self.known.get(uid)
+            if entry is not None:
+                entry["f"].update(targets)   # valeur finale, atteinte en fin de glissement
         self.retry_deferred()
         return errors
 

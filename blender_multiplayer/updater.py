@@ -129,7 +129,7 @@ def check(auto_install=False):
     state.update(status="checking", auto=auto_install, error="")
     threading.Thread(target=_check_thread, daemon=True, name="mp-update-check").start()
     if not bpy.app.timers.is_registered(_poll):
-        bpy.app.timers.register(_poll, first_interval=0.5)
+        bpy.app.timers.register(_poll, first_interval=0.5, persistent=True)
 
 
 def _poll():
@@ -188,12 +188,12 @@ def install():
         return "Installation classique : telechargez la nouvelle version sur la page qui vient de s'ouvrir."
     if kind == "remote":
         state["status"] = "installing"
-        bpy.app.timers.register(lambda: _install_remote(index), first_interval=0.1)
+        bpy.app.timers.register(lambda: _install_remote(index), first_interval=0.1, persistent=True)
         return ""
     state["status"] = "downloading"
     threading.Thread(target=_download_thread, args=(entry,), daemon=True, name="mp-update-dl").start()
     if not bpy.app.timers.is_registered(_poll):
-        bpy.app.timers.register(_poll, first_interval=0.5)
+        bpy.app.timers.register(_poll, first_interval=0.5, persistent=True)
     return ""
 
 
@@ -258,7 +258,9 @@ def _startup():
 def register():
     if bpy.app.background or os.environ.get("MP_NO_UPDATE_CHECK"):
         return
-    bpy.app.timers.register(_startup, first_interval=4.0)
+    # persistent : sinon Blender supprime le timer en chargeant le .blend passe au
+    # lancement (double-clic sur un fichier) et la verification ne se fait jamais.
+    bpy.app.timers.register(_startup, first_interval=4.0, persistent=True)
 
 
 def unregister():

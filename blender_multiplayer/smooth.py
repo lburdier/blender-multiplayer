@@ -56,7 +56,7 @@ class Smoother:
         if taken and self not in _active:
             _active.append(self)
             if not bpy.app.timers.is_registered(_timer):
-                bpy.app.timers.register(_timer, first_interval=_STEP)
+                bpy.app.timers.register(_timer, first_interval=_STEP, persistent=True)
         return taken
 
     def step(self, now):

@@ -25,16 +25,18 @@ class MP_OT_host(bpy.types.Operator):
         mp = context.window_manager.mp
         online = mp.online and bool(getattr(bpy.app, "online_access", True))
         try:
-            sess.host(mp.port, mp.password, mp.session_name or "Session",
-                      sync_frame=mp.sync_frame, online=online, relay=prefs.get().relay)
+            s = sess.host(mp.port, mp.password, mp.session_name or "Session",
+                          sync_frame=mp.sync_frame, online=online, relay=prefs.get().relay)
         except OSError as exc:
             self.report({"ERROR"}, "Impossible d'ouvrir le port %d : %s" % (mp.port, exc))
             return {"CANCELLED"}
+        moved = (" (port %d deja utilise sur ce PC)" % mp.port) if s.port != mp.port else ""
         if online:
-            self.report({"INFO"}, "Session ouverte. Copiez le lien d'invitation pour inviter des joueurs.")
+            self.report({"INFO"}, "Session ouverte%s. Copiez le lien d'invitation pour inviter "
+                                  "des joueurs." % moved)
         else:
-            self.report({"INFO"}, "Session ouverte (reseau local) : %s port %d" %
-                        (", ".join(net.local_addresses()), mp.port))
+            self.report({"INFO"}, "Session ouverte (reseau local) : %s port %d%s" %
+                        (", ".join(net.local_addresses()), s.port, moved))
         return {"FINISHED"}
 
 

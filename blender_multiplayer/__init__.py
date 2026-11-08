@@ -6,7 +6,7 @@ Ouvrir la barre laterale de la vue 3D (touche N) > onglet "Multijoueur".
 bl_info = {
     "name": "Blender Multiplayer",
     "author": "Maxence Marrot",
-    "version": (1, 4, 1),
+    "version": (1, 4, 2),
     "blender": (4, 2, 0),
     "doc_url": "https://github.com/lburdier/blender-multiplayer",
     "location": "Vue 3D > Barre laterale (N) > Multijoueur",
@@ -73,6 +73,11 @@ def register():
     if not bpy.app.background:
         operators.register_keymaps()
     updater.register()
+    # Une ancienne version (avant mise a jour) peut avoir laisse une session active.
+    try:
+        session.stop_orphans()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def unregister():

@@ -195,8 +195,12 @@ class Server:
                 pass
         else:
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((host, port))
-        self.sock.listen(16)
+        try:
+            self.sock.bind((host, port))
+            self.sock.listen(16)
+        except OSError:
+            self.sock.close()
+            raise
         self._thread = threading.Thread(target=self._accept, daemon=True, name="mp-accept")
         self._thread.start()
 

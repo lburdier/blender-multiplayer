@@ -13,6 +13,8 @@ Modele :
 
 import collections
 import datetime
+import errno
+import gc
 import hashlib
 import hmac
 import os
@@ -349,8 +351,8 @@ class HostSession(BaseSession):
         self.tracker.sync_frame = sync_frame
         self.history = history.History(self.session_dir, self.store)
         self.password = password or ""
-        self.port = int(port)
-        self.server = net.Server(self.port, self.inbox)
+        self.requested_port = int(port)
+        self.server, self.port = open_server(self.requested_port, self.inbox)
         if online:
             self.tunnel = tunnel.Tunnel(self.port, relay or tunnel.DEFAULT_RELAY)
         self.tracker.init_known(write_blobs=True)
@@ -369,8 +371,12 @@ class HostSession(BaseSession):
                                     "Debut de la session", kind="checkpoint", mergeable=False)
         entry["file"] = os.path.join(self.session_dir, "checkpoints", "00_depart.blend")
         self._update_hist(self.history.summary(entry))
-        self.toast("Session \"%s\" ouverte sur le port %d." % (self.session_name, self.port),
-                   (0.5, 1, 0.5))
+        if self.port != self.requested_port:
+            self.toast("Port %d deja utilise sur ce PC : session ouverte sur le port %d."
+                       % (self.requested_port, self.port), (1, 0.8, 0.3))
+        else:
+            self.toast("Session \"%s\" ouverte sur le port %d." % (self.session_name, self.port),
+                       (0.5, 1, 0.5))
         self.log("hote demarre: %s port %d (%s)" % (self.session_name, self.port,
                                                     ", ".join(net.local_addresses())))
         return self
@@ -1539,12 +1545,73 @@ class ClientSession(BaseSession):
 # API simple
 # ===========================================================================
 
+PORT_TRIES = 10
+
+
+def port_in_use(exc):
+    """Port deja pris (10048) ou reserve par Windows (10013)."""
+    return getattr(exc, "winerror", None) in (10048, 10013) or         getattr(exc, "errno", None) in (errno.EADDRINUSE, errno.EACCES)
+
+
+def open_server(port, inbox):
+    """Ouvre le serveur sur `port`, ou sur l'un des ports suivants s'il est
+    deja pris (autre Blender qui heberge sur ce PC...). Renvoie (serveur, port)."""
+    first = None
+    for p in range(port, min(port + PORT_TRIES, 65536)):
+        try:
+            return net.Server(p, inbox), p
+        except OSError as exc:
+            if not port_in_use(exc):
+                raise
+            first = first or exc
+    raise OSError(first.errno, "les ports %d a %d sont deja utilises sur ce PC (%s)"
+                  % (port, port + PORT_TRIES - 1, first.strerror or first))
+
+
+_ORPHAN_SESSIONS = ("HostSession", "ClientSession")
+_ORPHAN_TRANSPORTS = ("Server", "Tunnel")
+
+
+def stop_orphans():
+    """Arrete les sessions, serveurs et tunnels encore actifs qui ne sont pas
+    la session courante : restes d'une ancienne version de l'addon apres une
+    mise a jour ou un rechargement des scripts. Sans cela ils gardent le port
+    ouvert ("port deja utilise") et continuent d'echanger en arriere-plan.
+    Renvoie le nombre d'objets arretes."""
+    cur = current
+    keep = set()
+    if cur is not None:
+        keep = {id(cur), id(getattr(cur, "server", None)), id(getattr(cur, "tunnel", None))}
+    found = [o for o in gc.get_objects()
+             if type(o).__name__ in _ORPHAN_SESSIONS + _ORPHAN_TRANSPORTS
+             and "blender_multiplayer" in (type(o).__module__ or "") and id(o) not in keep]
+    n = 0
+    for o in found:
+        if type(o).__name__ in _ORPHAN_SESSIONS and getattr(o, "state", "closed") != "closed":
+            try:
+                o.stop("session orpheline")
+            except Exception:  # noqa: BLE001
+                pass
+            n += 1
+    for o in found:
+        if type(o).__name__ in _ORPHAN_TRANSPORTS and getattr(o, "running", False):
+            try:
+                o.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            n += 1
+    if n:
+        print("[Multiplayer] %d element(s) d'une session precedente arrete(s)" % n)
+    return n
+
+
 def host(port, password="", session_name="Session", username=None, color=None, sync_frame=False,
          online=False, relay=""):
     global current, last_reason
     last_reason = ""
     if current is not None:
         current.stop("nouvelle session")
+    stop_orphans()
     p = _prefs()
     s = HostSession(username or p.username or "Hote", color or tuple(p.color))
     try:
@@ -1564,6 +1631,7 @@ def join(address, port, password="", username=None, color=None, viewer=False):
     last_reason = ""
     if current is not None:
         current.stop("nouvelle session")
+    stop_orphans()
     p = _prefs()
     s = ClientSession(username or p.username or "Joueur", color or tuple(p.color), viewer=viewer)
     s.connect(address, port, password, timeout=invite.connect_timeout(address))

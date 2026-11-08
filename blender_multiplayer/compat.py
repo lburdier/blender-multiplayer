@@ -196,6 +196,23 @@ def anim_fcurves(ad):
     return out
 
 
+def animated_paths(ad):
+    """{chemin RNA: {index}} des valeurs reellement pilotees (f-curves et drivers
+    non coupes). Un addon qui coupe une f-curve (ex. conduite en direct) rend
+    la valeur a la main : elle redevient une modification a diffuser."""
+    out = {}
+    for fc in anim_fcurves(ad):
+        try:
+            if fc.mute:
+                continue
+            if fc.driver is None and not len(fc.keyframe_points) and not len(fc.modifiers):
+                continue
+            out.setdefault(fc.data_path, set()).add(fc.array_index)
+        except Exception:
+            continue
+    return out
+
+
 def has_animation(idb):
     for holder in (idb, getattr(idb, "node_tree", None), getattr(idb, "shape_keys", None)):
         ad = getattr(holder, "animation_data", None) if holder is not None else None

@@ -71,6 +71,8 @@ def describe(changes, op_label=None, known=None):
         verb = "Modificateurs"
     elif "_cons" in fields:
         verb = "Contraintes"
+    elif "_drv" in fields:
+        verb = "Drivers"
     elif fields == {"name"}:
         verb = "Renommage"
     elif "_objects" in fields or "_children" in fields:

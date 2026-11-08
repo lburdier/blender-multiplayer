@@ -297,6 +297,117 @@ def read_anim(idb):
     return {"a": ref(act), "s": slot}
 
 
+# Cible d'une variable de driver : reglages lus et appliques s'ils existent
+# (context_property n'existe qu'a partir de Blender 4.x).
+_DRV_TARGET = ("id_type", "data_path", "bone_target", "transform_type", "transform_space",
+               "rotation_mode", "context_property")
+
+
+def _read_driver_vars(d):
+    out = []
+    for v in d.variables:
+        targets = []
+        for t in v.targets:
+            td = {"id": ref(t.id)}
+            for k in _DRV_TARGET:
+                if hasattr(t, k):
+                    td[k] = getattr(t, k)
+            targets.append(td)
+        out.append([v.name, v.type, targets])
+    return out
+
+
+def read_drivers(idb):
+    """Drivers d'un data-block natif (objet, lumiere, camera) : un addon peut en
+    ajouter pendant la session (mise a niveau d'un rig...)."""
+    ad = getattr(idb, "animation_data", None)
+    if ad is None:
+        return []
+    out = []
+    for fc in ad.drivers:
+        try:
+            d = fc.driver
+            out.append([fc.data_path, fc.array_index, bool(fc.mute), d.type, d.expression,
+                        bool(d.use_self), _read_driver_vars(d)])
+        except Exception:  # noqa: BLE001
+            continue
+    out.sort(key=lambda x: (x[0], x[1]))
+    return out
+
+
+def _add_driver(idb, path, index):
+    try:
+        fc = idb.driver_add(path, index)
+    except TypeError:
+        fc = None
+    if fc is None and index == 0:
+        try:
+            fc = idb.driver_add(path)      # propriete simple (pas un tableau)
+        except TypeError:
+            fc = None
+    if isinstance(fc, (list, tuple)):
+        fc = fc[index] if index < len(fc) else None
+    return fc
+
+
+def apply_drivers(idb, want, ctx):
+    ad = getattr(idb, "animation_data", None)
+    have = {}
+    for fc in (ad.drivers if ad is not None else ()):
+        have.setdefault((fc.data_path, fc.array_index), fc)
+    unresolved = None
+    for path, index, mute, dtype, expr, use_self, variables in want:
+        fc = have.pop((path, index), None)
+        if fc is None:
+            fc = _add_driver(idb, path, index)
+            if fc is None:
+                unresolved = Unresolved("driver " + path)   # os ou modificateur pas encore la
+                continue
+        d = fc.driver
+        if fc.mute != mute:
+            fc.mute = mute
+        if d.type != dtype:
+            d.type = dtype
+        if d.expression != expr:
+            d.expression = expr
+        if d.use_self != use_self:
+            d.use_self = use_self
+        if _read_driver_vars(d) == variables:
+            continue
+        while len(d.variables):
+            d.variables.remove(d.variables[0])
+        for name, vtype, targets in variables:
+            var = d.variables.new()
+            var.name = name
+            var.type = vtype
+            for t, td in zip(var.targets, targets):
+                if "id_type" in td and vtype == "SINGLE_PROP":
+                    try:
+                        t.id_type = td["id_type"]
+                    except Exception:  # noqa: BLE001
+                        pass
+                for k in _DRV_TARGET[1:]:
+                    if k in td and hasattr(t, k):
+                        try:
+                            setattr(t, k, td[k])
+                        except Exception:  # noqa: BLE001
+                            pass
+                try:
+                    t.id = resolve_ref(td.get("id"), ctx)
+                except Unresolved as exc:
+                    unresolved = exc
+                except Exception:  # noqa: BLE001
+                    pass
+    if ad is not None:
+        for fc in have.values():
+            try:
+                ad.drivers.remove(fc)
+            except Exception:  # noqa: BLE001
+                pass
+    if unresolved is not None:
+        raise unresolved
+
+
 def apply_anim(idb, v, ctx):
     ad = getattr(idb, "animation_data", None)
     if v is None:
@@ -375,6 +486,7 @@ def read_object(obj, ctx, deep=True):
                 read_idprops(pb, rna=pb),
             ]
         f["_pose"] = pose
+    f["_drv"] = read_drivers(obj)
     return f
 
 
@@ -644,6 +756,8 @@ def apply_object_field(obj, k, v, ctx):
         apply_anim(obj, v, ctx)
     elif k == "_pose":
         _apply_pose(obj, v, ctx)
+    elif k == "_drv":
+        apply_drivers(obj, v, ctx)
     elif k == "_colls":
         _apply_object_collections(obj, v, ctx)
     else:
@@ -837,9 +951,13 @@ def _mesh_extra_hash(me):
     sk = me.shape_keys
     if sk is not None:
         h.update(("%s%s" % (sk.use_relative, sk.reference_key.name if sk.reference_key else "")).encode())
+        # valeurs pilotees (drivers, animation) : recalculees chez chacun, hors empreinte
+        driven = compat.animated_paths(sk.animation_data) if sk.animation_data else {}
         for kb in sk.key_blocks:
-            h.update(("%s|%.5f|%d|%.4f|%.4f|%s|%s|%s;" % (
-                kb.name, kb.value, kb.mute, kb.slider_min, kb.slider_max,
+            path = 'key_blocks["%s"].value' % kb.name.replace("\\", "\\\\").replace('"', '\\"')
+            value = "pilote" if path in driven else "%.5f" % kb.value
+            h.update(("%s|%s|%d|%.4f|%.4f|%s|%s|%s;" % (
+                kb.name, value, kb.mute, kb.slider_min, kb.slider_max,
                 kb.relative_key.name if kb.relative_key else "", kb.vertex_group,
                 kb.interpolation)).encode())
             buf = np.empty(len(kb.data) * 3, np.float32)
@@ -932,6 +1050,7 @@ def read_generic_id(idb, ctx, deep=True):
     f["name"] = idb.name
     f["_props"] = read_idprops(idb, rna=idb)
     f["_anim"] = read_anim(idb)
+    f["_drv"] = read_drivers(idb)
     nt = getattr(idb, "node_tree", None)
     if deep and nt is not None and isinstance(idb, bpy.types.Light):
         # Noeuds de la lumiere (Cycles : IES, corps noir...) : envoyes en bloc
@@ -954,6 +1073,8 @@ def apply_generic_field(idb, k, v, ctx):
         apply_idprops(idb, v, ctx)
     elif k == "_anim":
         apply_anim(idb, v, ctx)
+    elif k == "_drv":
+        apply_drivers(idb, v, ctx)
     else:
         apply_prop(idb, k, v, ctx)
 

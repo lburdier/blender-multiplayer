@@ -11,7 +11,7 @@ import time
 
 import bpy
 
-from . import compat, ids, payloads, serialize, smooth
+from . import animmask, compat, ids, payloads, serialize, smooth
 
 
 class Tracker:
@@ -52,6 +52,8 @@ class Tracker:
         self.mesh_last = {}    # uid maillage -> heure de la derniere lecture complete
         self.obj_last = {}     # uid objet -> heure de la derniere lecture complete
         self.budget = 0.006    # secondes de lectures completes par tick (le reste attend)
+        self.drv_targets = {}  # pointeur d'ID -> [heure, pointeurs des cibles de ses drivers]
+        self.waiting = {}      # uid -> heure ou sa lecture a ete repoussee faute de budget
         self.smoother = smooth.Smoother(self)
         try:
             from . import prefs
@@ -193,11 +195,51 @@ class Tracker:
     # ------------------------------------------------------------------
     # Depsgraph
     # ------------------------------------------------------------------
+    def _driver_targets(self, idb, now):
+        """Pointeurs des data-blocks lus par les drivers de `idb` (et de son
+        arbre de nodes, de ses cles de forme). Memorise 2 s."""
+        ptr = idb.as_pointer()
+        hit = self.drv_targets.get(ptr)
+        if hit is not None and now - hit[0] < 2.0:
+            return hit[1]
+        out = set()
+        for holder in (idb, getattr(idb, "node_tree", None), getattr(idb, "shape_keys", None)):
+            ad = getattr(holder, "animation_data", None) if holder is not None else None
+            if ad is None:
+                continue
+            for fc in ad.drivers:
+                try:
+                    for v in fc.driver.variables:
+                        for t in v.targets:
+                            if t.id is not None:
+                                out.add(t.id.as_pointer())
+                except Exception:  # noqa: BLE001
+                    continue
+        if len(self.drv_targets) > 50000:
+            self.drv_targets.clear()
+        self.drv_targets[ptr] = [now, out]
+        return out
+
     def on_depsgraph(self, depsgraph):
         try:
-            updates = depsgraph.updates
+            updates = list(depsgraph.updates)
         except Exception:
             return
+        batch = set()
+        for upd in updates:
+            try:
+                batch.add((getattr(upd.id, "original", None) or upd.id).as_pointer())
+            except Exception:
+                continue
+        now = time.time()
+        # Meme frame que lors de la derniere lecture : ce n'est pas la lecture
+        # de l'animation qui a provoque ces mises a jour.
+        try:
+            sc = compat.current_scene()
+            fr = (sc.name, sc.frame_current, round(sc.frame_subframe, 3)) if sc is not None else None
+        except Exception:  # noqa: BLE001
+            fr = None
+        static = fr is not None and fr == getattr(self, "_last_frame", None)
         for upd in updates:
             try:
                 idb = upd.id
@@ -211,6 +253,18 @@ class Tracker:
                                      bpy.types.Collection, bpy.types.NodeTree)):
                     self.need_scan = True
                 continue
+            if not isinstance(orig, bpy.types.Object) and uid not in self.dirty:
+                # Materiau, lumiere, maillage... recalcule parce qu'un de ses
+                # drivers lit un data-block qui vient de changer (ex. feux pilotes
+                # par le rig) : ce n'est pas une modification, ses valeurs
+                # pilotees sont hors empreinte. Le relire a chaque fois coutait
+                # jusqu'a 200 ms par lecture pendant qu'un addon anime le rig.
+                try:
+                    targets = self._driver_targets(orig, now)
+                except ReferenceError:
+                    targets = ()
+                if targets and not targets.isdisjoint(batch - {ptr}):
+                    continue
             flags = self.dirty.setdefault(uid, set())
             if uid not in self.ignore_next:
                 self.mode_activity.add(uid)
@@ -229,6 +283,19 @@ class Tracker:
                 flags.add("x")
                 if geom:
                     flags.add("g")
+            if static and uid not in self.ignore_next:
+                # Cle ajoutee par script ou par un addon (keyframe_insert, ecriture
+                # de f-curves) : Blender ne signale que l'objet anime, pas son
+                # action. Sans cela, l'action n'etait retrouvee que par le
+                # balayage de securite, plusieurs secondes plus tard.
+                try:
+                    ad = getattr(orig, "animation_data", None)
+                    act = ad.action if ad is not None else None
+                    act_uid = self.ptr2uid.get(act.as_pointer()) if act is not None else None
+                except Exception:  # noqa: BLE001
+                    act_uid = None
+                if act_uid is not None:
+                    self.dirty.setdefault(act_uid, set()).add("x")
         # Seule l'evaluation qui suit notre propre lecture est ignoree.
         self.ignore_next.clear()
 
@@ -326,21 +393,20 @@ class Tracker:
 
     @staticmethod
     def animated_fields(idb):
-        """Champs pilotes par l'animation ou des drivers : jamais diffuses.
+        """Valeurs pilotees par l'animation ou des drivers : jamais diffusees.
 
         Sinon chaque changement de frame (ou lecture de la timeline) serait vu
-        comme une modification et renvoye a tout le monde.
+        comme une modification et renvoye a tout le monde. Retourne (champs
+        entierement pilotes, masques des parties pilotees d'un champ : os,
+        proprietes, modificateurs...), voir animmask.
         """
         ad = getattr(idb, "animation_data", None)
         if ad is None:
-            return ()
-        fields = set()
-        for fc in compat.anim_fcurves(ad):
-            head = fc.data_path.split(".")[0].split("[")[0]
-            fields.add({"pose": "_pose", "modifiers": "_mods", "constraints": "_cons"}.get(head, head))
+            return (), None
+        fields, masks = animmask.split(compat.animated_paths(ad))
         if len(ad.nla_tracks):
             fields.update(("location", "rotation_euler", "rotation_quaternion", "scale", "_pose"))
-        return fields
+        return fields, masks
 
     def _frame_changed(self):
         sc = compat.current_scene()
@@ -389,8 +455,23 @@ class Tracker:
                 uid = self.rr[self.rr_pos]
                 self.rr_pos += 1
                 cand.setdefault(uid, set()).add("r")
-        # Les deplacements d'abord (latence), puis le reste dans la limite du budget.
-        order = sorted(cand.items(), key=lambda kv: 0 if kv[1] == {"t"} else (1 if "r" not in kv[1] else 2))
+        # Les deplacements d'abord (latence), puis les objets (pose d'un rig pilote
+        # par un addon...), puis le reste dans la limite du budget. Sans cela, les
+        # materiaux, lumieres et maillages recalcules par des drivers passaient
+        # avant le rig qui bouge et le retardaient.
+        waiting = self.waiting
+
+        def _prio(kv):
+            uid, fl = kv
+            w = waiting.get(uid)
+            if w is not None and now - w > 0.2:
+                return -1   # deja repousse : passe en premier, rien n'attend indefiniment
+            if fl == {"t"}:
+                return 0
+            if "r" in fl:
+                return 3
+            return 1 if self.attr_of.get(uid) == "objects" else 2
+        order = sorted(cand.items(), key=_prio)
         t_start = time.perf_counter()
         limit = None if (full or rr_budget is not None) else self.budget
         moving = {self.uid_ptr.get(u) for u, f in cand.items() if "t" in f or "x" in f}
@@ -428,14 +509,18 @@ class Tracker:
             if limit is not None and time.perf_counter() - t_start > limit:
                 if flags != {"r"}:
                     keep_dirty.setdefault(uid, set()).update(flags)
+                    waiting.setdefault(uid, now)
                 continue
+            waiting.pop(uid, None)
             if attr == "meshes":
                 size = len(idb.vertices)
                 wait = max(0.15, size / 200000.0)
                 if ("g" in flags or "x" in flags) and now - self.mesh_last.get(uid, 0.0) < wait:
                     keep_dirty[uid] = flags     # au plus une relecture complete par intervalle
                     continue
-                deep = "g" in flags or "x" in flags or ("r" in flags and size < 100000)
+                # Sans "g", la geometrie, les cles de forme et les poids n'ont pas
+                # change (ex. maillage reevalue par un driver) : lecture legere.
+                deep = "g" in flags or ("r" in flags and size < 100000)
                 if deep:
                     self.mesh_last[uid] = now
             elif mode == "blob":
@@ -459,8 +544,9 @@ class Tracker:
             for k in self.smoother.fields_of(uid):
                 cur.pop(k, None)   # en train de glisser vers la valeur connue
             passive = serialize.PASSIVE_FIELDS
+            masks = None
             if mode != "blob" and attr != "meshes":
-                anim = self.animated_fields(idb)
+                anim, masks = self.animated_fields(idb)
                 if anim:
                     passive = passive | anim
             elif frame_changed and compat.has_animation(idb):
@@ -469,7 +555,8 @@ class Tracker:
             diff = {}
             for k, v in cur.items():
                 if kf.get(k) != v:
-                    if k in passive:
+                    if k in passive or (masks and k in masks and
+                                        animmask.equal(k, v, kf.get(k), masks[k])):
                         kf[k] = v  # tenu a jour sans etre diffuse
                     else:
                         diff[k] = v
@@ -514,7 +601,7 @@ class Tracker:
         kf = self.known[uid]["f"]
         for k in self.smoother.fields_of(uid):
             cur.pop(k, None)
-        anim = self.animated_fields(idb)
+        anim, _masks = self.animated_fields(idb)
         diff = {}
         for k, v in cur.items():
             if kf.get(k) != v:
@@ -735,6 +822,7 @@ class Tracker:
             self.ptr2uid.pop(ptr, None)
         self.tombstones.add(uid)
         self.dirty.pop(uid, None)
+        self.waiting.pop(uid, None)
         return idb
 
     def retry_deferred(self):

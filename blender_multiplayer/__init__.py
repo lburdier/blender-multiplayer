@@ -6,7 +6,7 @@ Ouvrir la barre laterale de la vue 3D (touche N) > onglet "Multijoueur".
 bl_info = {
     "name": "Blender Multiplayer",
     "author": "Maxence Marrot",
-    "version": (1, 5, 0),
+    "version": (1, 6, 0),
     "blender": (4, 2, 0),
     "doc_url": "https://github.com/lburdier/blender-multiplayer",
     "location": "Vue 3D > Barre laterale (N) > Multijoueur",

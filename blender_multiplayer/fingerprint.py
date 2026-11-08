@@ -103,11 +103,31 @@ def _fmt(v):
         return str(v)
 
 
+def _anim_map(idb):
+    """{pointeur d'ID: chemins RNA pilotes} pour l'ID et son arbre de nodes.
+
+    Une valeur pilotee (driver, animation) change toute seule chez chaque
+    joueur des que ce qui la pilote change : elle ne fait pas partie de
+    l'empreinte, sinon le data-block serait renvoye en entier a chaque fois
+    (ex. emission des feux pilotee par une propriete du rig)."""
+    from . import compat
+    out = {}
+    for holder in (idb, getattr(idb, "node_tree", None)):
+        ad = getattr(holder, "animation_data", None) if holder is not None else None
+        if ad is None:
+            continue
+        paths = compat.animated_paths(ad)
+        if paths:
+            out[holder.as_pointer()] = set(paths)
+    return out
+
+
 class _Walker:
     def __init__(self):
         self.h = hashlib.sha1()
         self.seen = set()
         self.values = 0
+        self.anim = {}
 
     def w(self, s):
         self.h.update(s.encode("utf-8", "replace"))
@@ -178,6 +198,14 @@ class _Walker:
             return
         skip = _STRUCT_SKIP.get(ident, ())
         ro_inc = _RO_INCLUDE.get(ident, ())
+        apaths = base = None
+        if self.anim:
+            try:
+                apaths = self.anim.get(s.id_data.as_pointer())
+                if apaths:
+                    base = s.path_from_id()
+            except Exception:
+                apaths = None
         for p in srna.properties:
             k = p.identifier
             if k in _SKIP or k in skip:
@@ -226,6 +254,8 @@ class _Walker:
             else:
                 if p.is_readonly and k not in ro_inc:
                     continue
+                if apaths and ((base + "." + k) if base else k) in apaths:
+                    continue
                 try:
                     v = getattr(s, k)
                 except Exception:
@@ -237,6 +267,11 @@ class _Walker:
 def fingerprint(idb):
     w = _Walker()
     w.seen.add(idb.as_pointer())
+    try:
+        w.anim = _anim_map(idb)
+    except Exception:  # noqa: BLE001
+        w.anim = {}
+    top = w.anim.get(idb.as_pointer(), ())
     srna = idb.bl_rna
     skip = _STRUCT_SKIP.get(srna.identifier, ())
     # Le nom de l'ID est synchronise a part : on le laisse hors de l'empreinte.
@@ -289,13 +324,15 @@ def fingerprint(idb):
                 else:
                     w.walk(item, MAX_DEPTH)
         else:
-            if p.is_readonly:
+            if p.is_readonly or k in top:
                 continue
             w.w(k + "=" + _fmt(v) + ";")
     # Proprietes personnalisees (hors UID)
     try:
         for key in sorted(idb.keys()):
             if key.startswith("_"):
+                continue
+            if '["%s"]' % key in top:
                 continue
             val = idb[key]
             if hasattr(val, "to_list"):

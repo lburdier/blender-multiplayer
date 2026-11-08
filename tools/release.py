@@ -21,7 +21,8 @@ PKG = os.path.join(ROOT, "blender_multiplayer")
 
 
 def run(*cmd, **kw):
-    print("$", " ".join(cmd))
+    shown = " ".join(c if len(c) < 120 else c[:60] + "..." for c in cmd)
+    print("$", shown.encode("ascii", "replace").decode("ascii"))
     return subprocess.run(cmd, cwd=ROOT, check=True, **kw)
 
 

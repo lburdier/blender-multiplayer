@@ -378,6 +378,47 @@ def read_object(obj, ctx, deep=True):
     return f
 
 
+# Champs relus seuls quand Blender ne signale qu'un deplacement de l'objet.
+FAST_OBJECT_FIELDS = ("location", "rotation_mode", "rotation_euler", "rotation_quaternion",
+                      "rotation_axis_angle", "scale", "delta_location", "delta_rotation_euler",
+                      "delta_rotation_quaternion", "delta_scale")
+FAST_OBJECT_SET = frozenset(FAST_OBJECT_FIELDS)
+
+
+_FAST_PROPS = []
+
+
+def _fast_props(obj):
+    if not _FAST_PROPS:
+        props = obj.bl_rna.properties
+        for k in FAST_OBJECT_FIELDS:
+            p = props.get(k)
+            if p is not None:
+                arr = getattr(p, "is_array", None)
+                if arr is None:
+                    arr = getattr(p, "array_length", 0) > 0
+                _FAST_PROPS.append((k, p, p.type, bool(arr)))
+    return _FAST_PROPS
+
+
+def read_object_fast(obj):
+    """Transformation seule (meme format que read_object), pour un objet
+    qui bouge : bien plus rapide que la lecture complete."""
+    out = {}
+    for k, p, t, arr in _fast_props(obj):
+        try:
+            v = getattr(obj, k)
+            if arr and t == "FLOAT":
+                out[k] = [round(float(x), 6) for x in v]
+            elif t == "ENUM":
+                out[k] = v
+            else:
+                out[k] = _conv(v, p)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 def _object_collections(obj):
     """Collections contenant l'objet ("S:<uid>" = collection maitre d'une scene).
 

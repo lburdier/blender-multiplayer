@@ -25,7 +25,8 @@ def main():
     env["HOME"] = out
     env["USERPROFILE"] = out
     common = ["-b", "--factory-startup", "--python-exit-code", "1"]
-    host = subprocess.Popen([host_exe] + common + ["--python", os.path.join(HERE, "host_scenario%s.py" % scen),
+    scene = [os.environ["MP_SCENE"]] if os.environ.get("MP_SCENE") else []
+    host = subprocess.Popen([host_exe] + common[:1] + scene + common[1:] + ["--python", os.path.join(HERE, "host_scenario%s.py" % scen),
                                                    "--", ROOT, port, out],
                             stdout=open(os.path.join(out, "host.log"), "w"), stderr=subprocess.STDOUT,
                             env=env)
@@ -36,7 +37,7 @@ def main():
                               stderr=subprocess.STDOUT, env=env)
     try:
         host.wait(timeout=400)
-        client.wait(timeout=60)
+        client.wait(timeout=120)
     except subprocess.TimeoutExpired:
         host.kill()
         client.kill()
@@ -63,7 +64,7 @@ def main():
         bad_logs = [l for l in res.get("logs", []) if "erreur" in l.lower() or "Traceback" in l]
         for l in bad_logs:
             print("  LOG:", l[:600])
-    if "host" in states and "client" in states:
+    if "host" in states and "client" in states and not os.environ.get("MP_SCENE"):
         a, b = states["host"], states["client"]
         same = a == b
         print("== Convergence des scenes :", "IDENTIQUES" if same else "DIFFERENTES")

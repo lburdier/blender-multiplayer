@@ -49,6 +49,9 @@ class Tracker:
         self.px_known = {}     # uid image -> empreinte des derniers pixels synchronises
         self.px_state = {}     # uid image -> [empreinte vue, heure d'envoi, heure de lecture]
         self.px_t = 0.0
+        self.mesh_last = {}    # uid maillage -> heure de la derniere lecture complete
+        self.obj_last = {}     # uid objet -> heure de la derniere lecture complete
+        self.budget = 0.006    # secondes de lectures completes par tick (le reste attend)
         self.smoother = smooth.Smoother(self)
         try:
             from . import prefs
@@ -209,15 +212,23 @@ class Tracker:
                     self.need_scan = True
                 continue
             flags = self.dirty.setdefault(uid, set())
-            flags.add("x")
             if uid not in self.ignore_next:
                 self.mode_activity.add(uid)
-            if getattr(upd, "is_updated_geometry", False):
-                flags.add("g")
-                if isinstance(orig, bpy.types.Object) and orig.data is not None:
-                    duid = self.ptr2uid.get(orig.data.as_pointer())
-                    if duid:
-                        self.dirty.setdefault(duid, set()).update(("x", "g"))
+            geom = getattr(upd, "is_updated_geometry", False)
+            if isinstance(orig, bpy.types.Object):
+                # Un objet qui ne fait que bouger (ou suit son parent / une
+                # contrainte) : lecture rapide de sa transformation seulement.
+                # La geometrie evaluee d'un objet ne dit rien de son maillage :
+                # quand le maillage change, Blender le signale lui-meme.
+                if getattr(upd, "is_updated_transform", False) and not geom \
+                        and not getattr(upd, "is_updated_shading", False):
+                    flags.add("t")
+                else:
+                    flags.add("x")
+            else:
+                flags.add("x")
+                if geom:
+                    flags.add("g")
         # Seule l'evaluation qui suit notre propre lecture est ignoree.
         self.ignore_next.clear()
 
@@ -338,7 +349,7 @@ class Tracker:
         self._last_frame = fr
         return changed
 
-    def collect(self, now=None, rr_budget=None):
+    def collect(self, now=None, rr_budget=None, full=False):
         now = now or time.time()
         if self.need_scan or self.stale or now - self.last_scan > 0.5:
             self.scan()
@@ -368,7 +379,9 @@ class Tracker:
         # 2. Mises a jour (sales + balayage tournant)
         cand = dict(self.dirty)
         self.dirty = {}
-        if self.rr:
+        # Balayage de securite : seulement quand rien d'autre n'attend, pour ne
+        # jamais ralentir une manipulation en cours.
+        if self.rr and (rr_budget is not None or not cand):
             budget = rr_budget if rr_budget is not None else max(4, len(self.rr) // 40)
             for _ in range(min(budget, len(self.rr))):
                 if self.rr_pos >= len(self.rr):
@@ -376,14 +389,55 @@ class Tracker:
                 uid = self.rr[self.rr_pos]
                 self.rr_pos += 1
                 cand.setdefault(uid, set()).add("r")
-        for uid, flags in cand.items():
+        # Les deplacements d'abord (latence), puis le reste dans la limite du budget.
+        order = sorted(cand.items(), key=lambda kv: 0 if kv[1] == {"t"} else (1 if "r" not in kv[1] else 2))
+        t_start = time.perf_counter()
+        limit = None if (full or rr_budget is not None) else self.budget
+        moving = {self.uid_ptr.get(u) for u, f in cand.items() if "t" in f or "x" in f}
+        for uid, flags in order:
             if uid not in self.known or uid not in self.index:
                 continue
             attr = self.attr_of[uid]
             idb = self.index[uid]
             mode = ids.mode_of(attr)
+            if flags == {"t"} and attr == "objects":
+                try:
+                    par = idb.parent
+                    if par is not None and par.as_pointer() in moving:
+                        continue    # suit son parent qui bouge : rien a envoyer
+                except ReferenceError:
+                    continue
+                tdiff = self._fast_transform(uid, idb)
+                if tdiff is None:
+                    flags = {"x"}   # immobile et independant : autre reglage -> lecture complete
+                else:
+                    if tdiff:
+                        changes.append({"u": uid, "t": attr, "k": "u", "f": tdiff})
+                    continue
+            if attr == "objects" and "x" in flags and limit is not None:
+                # Enfant dont la geometrie est reevaluee parce que son parent bouge :
+                # une relecture complete toutes les 0,5 s suffit.
+                try:
+                    par = idb.parent
+                    if par is not None and par.as_pointer() in moving and                             now - self.obj_last.get(uid, 0.0) < 0.5:
+                        keep_dirty.setdefault(uid, set()).update(flags)
+                        continue
+                except ReferenceError:
+                    continue
+                self.obj_last[uid] = now
+            if limit is not None and time.perf_counter() - t_start > limit:
+                if flags != {"r"}:
+                    keep_dirty.setdefault(uid, set()).update(flags)
+                continue
             if attr == "meshes":
-                deep = "g" in flags or ("r" in flags and len(idb.vertices) < 100000)
+                size = len(idb.vertices)
+                wait = max(0.15, size / 200000.0)
+                if ("g" in flags or "x" in flags) and now - self.mesh_last.get(uid, 0.0) < wait:
+                    keep_dirty[uid] = flags     # au plus une relecture complete par intervalle
+                    continue
+                deep = "g" in flags or "x" in flags or ("r" in flags and size < 100000)
+                if deep:
+                    self.mesh_last[uid] = now
             elif mode == "blob":
                 deep = True
                 if now - self.blob_last.get(uid, 0.0) < self.blob_interval and "r" not in flags:
@@ -447,6 +501,35 @@ class Tracker:
             k = self.known[uid]
             changes.append({"u": uid, "t": k["t"], "k": "d", "n": k["f"].get("name", "")})
         return changes
+
+    def _fast_transform(self, uid, idb):
+        """Compare la transformation seule. Retourne le diff (eventuellement
+        vide), ou None si l'objet n'a pas bouge alors qu'il ne depend de rien :
+        un autre reglage a change (ex. affichage), il faut une lecture complete."""
+        try:
+            cur = serialize.read_object_fast(idb)
+        except ReferenceError:
+            self.stale = True
+            return {}
+        kf = self.known[uid]["f"]
+        for k in self.smoother.fields_of(uid):
+            cur.pop(k, None)
+        anim = self.animated_fields(idb)
+        diff = {}
+        for k, v in cur.items():
+            if kf.get(k) != v:
+                if k in anim:
+                    kf[k] = v
+                else:
+                    diff[k] = v
+        if diff:
+            return diff
+        try:
+            dependent = idb.parent is not None or len(idb.constraints) > 0 \
+                or idb.animation_data is not None
+        except ReferenceError:
+            return {}
+        return {} if dependent else None
 
     def _collect_pixels(self, now):
         if now - self.px_t < 0.25:
@@ -521,7 +604,11 @@ class Tracker:
             return
         deep = created or any(serialize.is_deep_field(attr, k) for k in fields)
         try:
-            cur = serialize.read(attr, idb, self, deep=deep)
+            if attr == "objects" and not created and fields and \
+                    set(fields) <= serialize.FAST_OBJECT_SET:
+                cur = serialize.read_object_fast(idb)
+            else:
+                cur = serialize.read(attr, idb, self, deep=deep)
         except Exception:
             cur = dict(fields)
         entry = self.known.get(uid)

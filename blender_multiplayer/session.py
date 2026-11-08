@@ -589,7 +589,7 @@ class HostSession(BaseSession):
         if conn is None or client is None:
             return
         self.tracker.smoother.finish_all()
-        changes = self.tracker.collect()
+        changes = self.tracker.collect(full=True)
         if changes:
             self.commit(self.me, changes, history.describe(changes, None, self.tracker.known),
                         local=True)
@@ -875,7 +875,7 @@ class HostSession(BaseSession):
                 self._hist_changed(m)
 
     def _flush_local(self):
-        changes = self.tracker.collect()
+        changes = self.tracker.collect(full=True)
         if changes:
             self.commit(self.me, changes,
                         history.describe(changes, self.tracker.operator_label(), self.tracker.known),
@@ -1217,7 +1217,7 @@ class ClientSession(BaseSession):
 
     def flush(self):
         if self.active and self.role != "viewer":
-            changes = self.tracker.collect()
+            changes = self.tracker.collect(full=True)
             if changes:
                 self._send_op(changes)
 

@@ -70,7 +70,9 @@ def driver():
                          "positions_differentes_par_s": round(sum(1 for m in moves if m > 1e-6) / dur, 1),
                          "images_figees_pct": round(100.0 * sum(1 for m in moves if m <= 1e-6) / max(1, len(moves)), 1),
                          "plus_grand_saut": round(max(moves) if moves else 0, 3),
-                         "saut_moyen": round(sum(moves) / max(1, len(moves)), 4)}
+                         "saut_moyen": round(sum(moves) / max(1, len(moves)), 4),
+                         "historique": len(s.history.entries),
+                         "libelles": [e["label"] for e in s.history.entries][-8:]}
                 with open(os.path.join(OUT, "smooth_%d.json" % SMOOTH), "w") as fh:
                     json.dump(stats, fh)
                 bpy.ops.wm.quit_blender()

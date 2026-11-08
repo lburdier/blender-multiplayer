@@ -2,6 +2,16 @@
 
 Éditez **la même scène Blender à plusieurs, en temps réel**. Chacun travaille de son côté, voit les autres se déplacer dans la scène, voit ce qu'ils sélectionnent, créent et modifient, avec un historique collaboratif (Ctrl+Z partagé, retour à n'importe quel point), des autosauvegardes et des sauvegardes restaurables.
 
+![Vue de l'hôte pendant une session](docs/images/vue_hote.png)
+
+*Vue de l'hôte (Alex) : la caméra et le cadre bleus montrent où regarde Sam et ce qu'il a sélectionné ; les messages du chat s'affichent dans la vue ; le panneau **Multijoueur** donne le lien d'invitation, les joueurs connectés et l'historique partagé.*
+
+| Vue de l'invité (Sam), connecté par Internet | Panneaux de l'hôte et de l'invité |
+|---|---|
+| ![Vue de l'invité](docs/images/vue_invite.png) | ![Panneaux Multijoueur](docs/images/panneaux.png) |
+
+**[⬇ Télécharger l'addon](https://lburdier.github.io/blender-multiplayer/)** · [Dernière version sur GitHub](https://github.com/lburdier/blender-multiplayer/releases/latest)
+
 Testé sous **Blender 4.3, 5.0 et 5.1**, y compris en mélangeant les versions 5.x (hôte 5.1 et client 5.0, et l'inverse), en réseau local comme par Internet. Les API qui changent d'une version à l'autre sont détectées à l'exécution, pour viser aussi les versions suivantes (5.2, 5.3…).
 
 ## Installation

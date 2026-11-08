@@ -43,7 +43,7 @@ try:
     sc = bpy.context.scene
     tex = bpy.data.images.get("TexExterne")
     T.check("texture externe recue (fichier copie)", tex is not None and os.path.isfile(bpy.path.abspath(tex.filepath))
-            and "assets" in tex.filepath, tex.filepath if tex else None)
+            and ("assets" in tex.filepath or "cache" in tex.filepath), tex.filepath if tex else None)
     T.check("texture externe affichee (pixels)", tex is not None and px(tex) == [1.0, 0.0, 0.0, 1.0],
             px(tex) if tex else None)
     udim = bpy.data.images.get("TexUdim")

@@ -58,6 +58,8 @@ Le lien est **privé** : il contient l'adresse de la session et son mot de passe
 - Maillages : géométrie complète et attributs (UV, couleurs, arêtes vives, index de matériau…), **en direct pendant le mode Édition**, avec un aller-retour bit à bit identique.
 - **Textures** :
   - les fichiers d'image utilisés par la scène sont **envoyés avec elle** à l'arrivée d'un joueur, y compris les tuiles **UDIM**, ainsi que les polices, sons, vidéos, VDB, Alembic et bibliothèques `.blend` liées ;
+  - quand il y a beaucoup de textures à envoyer (plus de 8 Mo), **la scène arrive d'abord** et l'invité peut travailler tout de suite ; les textures suivent en arrière-plan, sans retarder les modifications des autres, et s'affichent au fur et à mesure (avancement dans la barre d'état) ;
+  - seuls les fichiers que l'invité n'a pas déjà sont envoyés : ceux reçus lors d'une session précédente restent dans un **cache** (4 Go au plus, dans le dossier de l'addon), et ceux qui existent déjà au même endroit sur son PC (projet synchronisé, deux Blender sur le même PC) sont repris sans passer par le réseau, après vérification de leur contenu ;
   - un fichier de texture **modifié sur le disque** (retouché dans Photoshop, Substance…) est détecté, rechargé et renvoyé à tous automatiquement ;
   - la **peinture de texture** dans Blender est diffusée pendant que l'on peint, même sans enregistrer l'image (dans les deux sens).
 - Matériaux, arbres de nodes, mondes, animations (actions 5.x à slots), armatures (os ajoutés en mode Édition), courbes, textes, Grease Pencil, lattices, metaballs, volumes, cheveux, nuages de points… : envoyés en « blob » (data-block complet), donc fidèles à 100 %.
@@ -125,6 +127,10 @@ python tests/run_integration.py "<blender hôte>" "<blender client>" 57124 2    
 python tests/run_integration.py "<blender hôte>" "<blender client>" 57126 3    # scénario 3 (textures, lumières, rendu, fluidité, expiration)
 MP_TEST_ONLINE=1 python tests/run_integration.py "<hôte>" "<client>" 57125     # scénario 1 via le relais Internet et le lien d'invitation
 python tests/run_update_test.py "<blender>" dist/blender_multiplayer-x.y.z.zip  # mise à jour automatique (zip et dépôt distant)
+python tests/run_update_gui_test.py "<blender>" dist/blender_multiplayer-x.y.z.zip  # mise à jour au démarrage (Blender ouvert sur un .blend)
+# Temps d'arrivée d'un invité sur une vraie scène (MP_J_NOHINT=1 : comme sur deux PC, MP_J_REJOIN=1 : 2e connexion)
+MP_SCENE="<scene.blend>" python tests/run_integration.py "<hôte>" "<client>" 57140 J
+# Compatibilité avec une autre version de l'addon : MP_HOST_ROOT / MP_CLIENT_ROOT = dossier contenant blender_multiplayer
 ```
 
 Le scénario 1 couvre la création et la suppression à distance, les matériaux, le Ctrl+Z partagé, les modifications simultanées, le verrou en mode Édition avec la géométrie en direct, les modificateurs, les collections, les parents, le retour à un point et son annulation, les sauvegardes. Le scénario 2 couvre les lumières, les caméras, l'animation, Geometry Nodes, les images, les courbes, l'armature (pose et os), le texte, Maj+D, les conflits de noms simultanés et l'absence d'opération quand on change de frame. Le scénario 3 couvre les textures (fichiers externes, tuiles UDIM, fichier modifié sur le disque, peinture dans les deux sens), tous les paramètres et nodes des lumières, le partage des réglages de rendu (le périphérique et la vue 3D restant propres à chacun), le glissement des objets sans écho et l'expiration de l'historique avec archive.

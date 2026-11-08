@@ -7,6 +7,11 @@ import mp_common as T  # noqa: E402
 import probe_util as P  # noqa: E402
 
 T.ROLE = "client"
+if os.environ.get("MP_J_NOHINT"):
+    # Simule deux PC : les textures ne sont pas au meme chemin et arrivent apres la scene.
+    _fc = sys.modules[T.session.__name__.rsplit(".", 1)[0] + ".filecache"]
+    _find = _fc.find
+    _fc.find = lambda root, sha, size, fn, path_hint="": _find(root, sha, size, fn, "")
 session = T.session
 try:
     s = None

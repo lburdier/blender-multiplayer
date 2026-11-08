@@ -36,7 +36,8 @@ _SKIP = frozenset((
 # Proprietes a ignorer pour un type de struct precis
 _STRUCT_SKIP = {
     "GreasePencilDrawing": frozenset(("strokes",)),
-    "Image": frozenset(("render_slots", "pixels")),
+    # file_format, resolution : les lire oblige Blender a decoder toute l'image (tres lent).
+    "Image": frozenset(("render_slots", "pixels", "file_format", "resolution")),
     "Mesh": frozenset(("vertices", "edges", "loops", "polygons", "loop_triangles",
                        "loop_triangle_polygons", "polygon_normals", "vertex_normals",
                        "corner_normals", "uv_layers", "color_attributes")),
@@ -248,6 +249,9 @@ def fingerprint(idb):
         if k in _SKIP or k in skip or k == "name":
             continue
         t = p.type
+        if t not in ("POINTER", "COLLECTION") and p.is_readonly:
+            # Ne pas lire : certaines (Image.depth...) obligent a decoder toute l'image.
+            continue
         try:
             v = getattr(idb, k)
         except Exception:

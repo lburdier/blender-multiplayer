@@ -1,6 +1,7 @@
 """Lance un hote et un client Blender en arriere-plan et compare leurs scenes.
 
 Usage : python run_integration.py <blender_hote.exe> <blender_client.exe> [port]
+MP_HOST_ROOT / MP_CLIENT_ROOT : dossier contenant une autre version de l'addon (compatibilite).
 """
 
 import json
@@ -27,12 +28,12 @@ def main():
     common = ["-b", "--factory-startup", "--python-exit-code", "1"]
     scene = [os.environ["MP_SCENE"]] if os.environ.get("MP_SCENE") else []
     host = subprocess.Popen([host_exe] + common[:1] + scene + common[1:] + ["--python", os.path.join(HERE, "host_scenario%s.py" % scen),
-                                                   "--", ROOT, port, out],
+                                                   "--", os.environ.get("MP_HOST_ROOT", ROOT), port, out],
                             stdout=open(os.path.join(out, "host.log"), "w"), stderr=subprocess.STDOUT,
                             env=env)
     time.sleep(2.0)
     client = subprocess.Popen([client_exe] + common + ["--python", os.path.join(HERE, "client_scenario%s.py" % scen),
-                                                       "--", ROOT, port, out],
+                                                       "--", os.environ.get("MP_CLIENT_ROOT", ROOT), port, out],
                               stdout=open(os.path.join(out, "client.log"), "w"),
                               stderr=subprocess.STDOUT, env=env)
     try:

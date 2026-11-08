@@ -27,7 +27,8 @@ import traceback
 
 import bpy
 
-from . import compat, history, ids, invite, net, payloads, presence, serialize, smooth, tunnel
+from . import (compat, filecache, history, ids, invite, net, payloads, presence, serialize, smooth,
+               tunnel)
 from . import tracker as tracker_mod
 
 current = None
@@ -534,6 +535,11 @@ class HostSession(BaseSession):
             self._send_state(conn, msg.get("uids", []))
         elif t == "resync":
             self._send_snapshot(cid)
+        elif t == "have":
+            client["have"] = set(str(x) for x in (msg.get("sha") or [])[:20000])
+            if not client.get("ready"):
+                self._send_snapshot(cid)
+                conn.send(self._users_msg())
         elif t == "ping":
             conn.send({"type": "pong", "t": msg.get("t")})
         elif t == "bye":
@@ -574,11 +580,16 @@ class HostSession(BaseSession):
         self.users[uid] = {"id": uid, "name": name, "color": tuple(color), "role": role,
                            "ver": msg.get("ver", "?"), "presence": {}}
         client["user"] = uid
+        client["caps"] = set(str(c) for c in (msg.get("caps") or ())[:20])
         conn.send({"type": "welcome", "user": uid, "session": self.session_name,
                    "settings": {"sync_frame": self.sync_frame}, "host_ver": compat.VERSION_STR,
                    "hist": self.history.summaries(), "locks": self.locks,
                    "chat": list(self.chat)[-50:]})
-        self._send_snapshot(cid)
+        if "manifest" in (msg.get("caps") or ()):
+            # L'invite dira d'abord quelles textures il a deja : seules les autres seront envoyees.
+            self._send_manifest(cid, conn)
+        else:
+            self._send_snapshot(cid)
         self.broadcast(self._users_msg())
         for ouid, ouser in self.users.items():
             if ouid != uid and ouser.get("presence"):
@@ -607,21 +618,85 @@ class HostSession(BaseSession):
             os.remove(path)
         except OSError:
             pass
-        ext, parts = self._snapshot_extras()
+        ext, parts, later = self._snapshot_extras(client.get("have", ()),
+                                                  stream="stream" in client.get("caps", ()))
         extra = sum(len(p) for p in parts)
         conn.send({"type": "snapshot", "seq": self.msg_seq, "name": self.session_name,
                    "size": len(data) + extra, "blend_len": len(data), "ext": ext},
                   data + b"".join(parts) if parts else data)
         client["ready"] = True
-        self.log("instantane envoye au client %s : scene %d Ko + %d fichier(s)/texture(s) %d Ko" % (
-            cid, len(data) // 1024, len(ext), extra // 1024))
+        for sha, path, fn in later:
+            self._stream_file(conn, sha, path, fn)
+        if later:
+            self.log("%d texture(s) envoyee(s) apres la scene (%d Ko)" % (
+                len(later), sum(e.get("size", 0) for e in ext if e.get("later")) // 1024))
+        reused = sum(1 for e in ext if e.get("have"))
+        inline = sum(1 for e in ext if not e.get("have") and not e.get("later"))
+        self.log("instantane envoye au client %s : scene %d Ko + %d fichier(s)/texture(s) %d Ko"
+                 "%s" % (cid, len(data) // 1024, inline, extra // 1024,
+                         " (%d deja chez l'invite)" % reused if reused else ""))
 
-    def _snapshot_extras(self):
+    def _external_file_list(self):
+        """[(uid, attr, data-block, chemin, tuile)] des fichiers externes a joindre a la scene."""
+        out = []
+        for attr in serialize.FILE_ATTRS:
+            for idb in getattr(bpy.data, attr, ()):
+                uid = ids.get_uid(idb)
+                if not uid:
+                    continue
+                for path, tile in serialize.external_files(idb):
+                    out.append((uid, attr, idb, path, tile))
+        return out
+
+    def _send_manifest(self, cid, conn):
+        files, seen = [], set()
+        for _uid, _attr, _idb, path, tile in self._external_file_list():
+            if tile is not None:
+                continue
+            try:
+                size = os.path.getsize(path)
+                if size > serialize.MAX_ATTACHED_FILE:
+                    continue
+                sha = filecache.file_sha(path)
+            except OSError:
+                continue
+            if sha in seen:
+                continue
+            seen.add(sha)
+            files.append({"sha": sha, "size": size, "fn": os.path.basename(path), "path": path})
+        conn.send({"type": "manifest", "files": files})
+
+    def _stream_file(self, conn, sha, path, fn):
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError as exc:
+            self.log("texture %s: %s" % (fn, exc))
+            return
+        total = len(data)
+        for off in range(0, max(total, 1), STREAM_CHUNK):
+            conn.send_bulk({"type": "filechunk", "sha": sha, "fn": fn, "off": off, "total": total},
+                           data[off:off + STREAM_CHUNK])
+
+    def _snapshot_extras(self, have=(), stream=False):
         """Ce que le .blend ne contient pas : fichiers externes (textures, tuiles
         UDIM, polices, sons, videos, VDB, Alembic), bibliotheques liees et pixels
-        des textures peintes non enregistrees."""
-        ext, parts = [], []
+        des textures peintes non enregistrees. Les fichiers que l'invite possede
+        deja (`have` : empreintes sha256) ne sont pas renvoyes."""
+        ext, parts, later = [], [], []
         budget = [2 * 1024 ** 3]
+        files = self._external_file_list()
+        hashes = {}
+        for _uid, _attr, _idb, path, tile in files:
+            if tile is None:
+                try:
+                    hashes[path] = (filecache.file_sha(path), os.path.getsize(path))
+                except OSError:
+                    pass
+        missing = {h for h in hashes.values() if h[0] not in have}
+        # Beaucoup de textures a envoyer : la scene part d'abord, les textures ensuite.
+        stream = stream and sum(m[1] for m in missing) > STREAM_MIN
+        streamed = set()
 
         def add(item, blob):
             if len(blob) > budget[0]:
@@ -640,19 +715,28 @@ class HostSession(BaseSession):
                 pass
             return None
 
-        for attr in serialize.FILE_ATTRS:
-            for idb in getattr(bpy.data, attr, ()):
-                uid = ids.get_uid(idb)
-                if not uid:
+        for uid, attr, idb, path, tile in files:
+            item = {"k": "file", "u": uid, "a": attr, "fn": os.path.basename(path)}
+            if tile is None and path in hashes:
+                sha, size = hashes[path]
+                item["sha"] = sha
+                if sha in have:
+                    item.update(len=0, have=1)
+                    ext.append(item)
                     continue
-                for path, tile in serialize.external_files(idb):
-                    blob = read(path)
-                    if blob is not None:
-                        item = {"k": "file", "u": uid, "a": attr, "fn": os.path.basename(path)}
-                        if tile is not None:
-                            item["tile"] = tile
-                            item["pat"] = os.path.basename(bpy.path.abspath(idb.filepath))
-                        add(item, blob)
+                if stream and size <= serialize.MAX_ATTACHED_FILE:
+                    item.update(len=0, later=1, size=size)
+                    ext.append(item)
+                    if sha not in streamed:
+                        streamed.add(sha)
+                        later.append((sha, path, item["fn"]))
+                    continue
+            blob = read(path)
+            if blob is not None:
+                if tile is not None:
+                    item["tile"] = tile
+                    item["pat"] = os.path.basename(bpy.path.abspath(idb.filepath))
+                add(item, blob)
         for lib in bpy.data.libraries:
             try:
                 path = bpy.path.abspath(lib.filepath)
@@ -670,7 +754,7 @@ class HostSession(BaseSession):
                     add(meta, blob)
             except Exception as exc:  # noqa: BLE001
                 self.log("pixels %s: %s" % (img.name, exc))
-        return ext, parts
+        return ext, parts, later
 
     def _send_state(self, conn, uids):
         states = {}
@@ -1141,6 +1225,10 @@ class ClientSession(BaseSession):
         self.viewer = viewer
         self.op_id = 0
         self.pending = {}
+        self.incoming = {}         # textures envoyees apres la scene : sha -> reception
+        self.stream_total = 0
+        self.stream_got = 0
+        self.local_files = {}
         self.snap_seq = -1
         self.rtt = 0
         self.ping_t = 0.0
@@ -1167,9 +1255,12 @@ class ClientSession(BaseSession):
             pct = int(self.conn.rx_progress * 100) if self.conn else 0
             return "Multijoueur - Reception de la scene... %d%%" % pct
         if self.state == "ready":
-            return "Multijoueur - \"%s\" - %d joueur(s) - ping %d ms%s" % (
+            textures = ""
+            if self.incoming and self.stream_total:
+                textures = " - textures %d%%" % int(100 * self.stream_got / self.stream_total)
+            return "Multijoueur - \"%s\" - %d joueur(s) - ping %d ms%s%s" % (
                 self.session_name, len(self.users), self.rtt,
-                " - spectateur" if self.role == "viewer" else "")
+                " - spectateur" if self.role == "viewer" else "", textures)
         return "Multijoueur - connexion..."
 
     def send(self, msg, binary=b""):
@@ -1264,7 +1355,7 @@ class ClientSession(BaseSession):
 
     def _handle(self, msg, binary):
         t = msg.get("type")
-        if binary and t != "snapshot":
+        if binary and t not in ("snapshot", "filechunk"):
             payloads.detach(msg, binary, self.store)
         if t == "challenge":
             self.session_name = msg.get("name", "")
@@ -1272,7 +1363,7 @@ class ClientSession(BaseSession):
                 self.error = "Version du protocole differente de l'hote."
             self.send({"type": "hello", "proto": net.PROTOCOL_VERSION, "name": self.username,
                        "color": list(self.color), "ver": compat.VERSION_STR,
-                       "addon": ADDON_VERSION, "viewer": self.viewer,
+                       "addon": ADDON_VERSION, "viewer": self.viewer, "caps": ["manifest", "stream"],
                        "auth": _auth(self.password, msg.get("nonce", "")) if self.password else ""})
         elif t == "welcome":
             self.me = msg["user"]
@@ -1287,6 +1378,10 @@ class ClientSession(BaseSession):
             self.role = "viewer" if self.viewer else "editor"
             self.state = "sync"
             self.toast("Connecte. Reception de la scene...")
+        elif t == "manifest":
+            self._on_manifest(msg)
+        elif t == "filechunk":
+            self._on_filechunk(msg, binary)
         elif t == "snapshot":
             self._on_snapshot(msg, binary)
         elif t == "op":
@@ -1436,6 +1531,73 @@ class ClientSession(BaseSession):
         self.toast("Scene synchronisee (%d Ko). Bonne session !" % (len(binary) // 1024), (0.5, 1, 0.5))
         compat.tag_redraw()
 
+    def _on_filechunk(self, msg, binary):
+        sha = str(msg.get("sha", ""))
+        inc = self.incoming.get(sha)
+        if inc is None:
+            return
+        total = int(msg.get("total", -1))
+        if total != inc["size"] or total > serialize.MAX_ATTACHED_FILE:
+            self.incoming.pop(sha, None)
+            return
+        if inc["buf"] is None:
+            inc["buf"] = bytearray(total)
+        off = int(msg.get("off", 0))
+        if off < 0 or off + len(binary) > total or off in inc["offs"]:
+            return
+        inc["offs"].add(off)
+        inc["buf"][off:off + len(binary)] = binary
+        inc["got"] += len(binary)
+        self.stream_got += len(binary)
+        if inc["got"] < total:
+            return
+        self.incoming.pop(sha, None)
+        data = bytes(inc["buf"])
+        if hashlib.sha256(data).hexdigest() != sha:
+            self.log("texture %s corrompue, ignoree" % inc["fn"])
+            return
+        try:
+            path = filecache.store(root_dir(), sha, inc["fn"], data)
+        except OSError as exc:
+            self.log("texture %s: %s" % (inc["fn"], exc))
+            return
+        for uid, attr, target in inc["targets"]:
+            idb = self.tracker.resolve(uid)
+            if idb is None:
+                continue
+            try:
+                if os.path.normcase(bpy.path.abspath(idb.filepath)) != os.path.normcase(target):
+                    continue   # remplacee entre-temps par une modification plus recente
+                if idb.filepath != path:
+                    idb.filepath = path   # meme contenu sous un autre nom : un seul fichier
+                if hasattr(idb, "reload"):
+                    idb.reload()
+                # etat connu a jour : ce n'est pas une modification locale a diffuser
+                self.tracker.accept(uid, attr or self.tracker.attr_of.get(uid, "images"),
+                                    {"fp": 1, "fsig": 1})
+            except Exception as exc:  # noqa: BLE001
+                self.log("texture %s: %s" % (inc["fn"], exc))
+        compat.tag_redraw()
+        if not self.incoming:
+            self.toast("Toutes les textures sont arrivees.", (0.5, 1, 0.5))
+
+    def _on_manifest(self, msg):
+        """Repond a l'hote avec les fichiers deja presents sur ce PC."""
+        root = root_dir()
+        self.local_files = {}
+        have = []
+        for f in (msg.get("files") or [])[:20000]:
+            sha = str(f.get("sha", ""))
+            if len(sha) != 64:
+                continue
+            path = filecache.find(root, sha, f.get("size"), f.get("fn"), str(f.get("path") or ""))
+            if path:
+                self.local_files[sha] = path
+                have.append(sha)
+        self.send({"type": "have", "sha": have})
+        if have:
+            self.log("%d fichier(s) deja presents sur ce PC, non retelecharges" % len(have))
+
     def _apply_snapshot_extras(self, ext, binary, offset):
         """Installe les fichiers externes et les pixels envoyes avec la scene."""
         folder = self.assets_dir()
@@ -1445,7 +1607,8 @@ class ClientSession(BaseSession):
                 u = ids.get_uid(idb)
                 if u:
                     by_uid[u] = idb
-        reload, px = [], {}
+        reload, px, received = [], {}, []
+        self.incoming = {}
         for item in ext:
             size = int(item.get("len", 0))
             blob = binary[offset:offset + size]
@@ -1462,11 +1625,26 @@ class ClientSession(BaseSession):
                         with open(os.path.join(sub, item["fn"]), "wb") as fh:
                             fh.write(blob)
                         new = os.path.join(sub, item.get("pat") or item["fn"])
+                    elif item.get("later"):
+                        # Texture envoyee juste apres la scene : on la placera a son arrivee.
+                        sha = str(item.get("sha", ""))
+                        new = filecache.cached_path(root_dir(), sha, item["fn"])
+                        inc = self.incoming.setdefault(sha, {
+                            "fn": item["fn"], "size": int(item.get("size", 0)), "buf": None,
+                            "got": 0, "offs": set(), "targets": []})
+                        inc["targets"].append((item.get("u"), item.get("a"), new))
+                        if idb.filepath != new:
+                            idb.filepath = new
+                        continue
+                    elif item.get("have"):
+                        new = getattr(self, "local_files", {}).get(item.get("sha"))
+                        if not new:
+                            self.log("fichier %s annonce present mais introuvable" % item.get("fn"))
+                            continue
                     else:
-                        new = os.path.join(folder, "%s_%s" % (payloads.sha(blob)[:10], item["fn"]))
-                        if not os.path.exists(new):
-                            with open(new, "wb") as fh:
-                                fh.write(blob)
+                        sha = item.get("sha") or hashlib.sha256(blob).hexdigest()
+                        new = filecache.store(root_dir(), sha, item["fn"], blob)
+                        received.append(new)
                     if idb.filepath != new:
                         idb.filepath = new
                     if idb not in reload:
@@ -1500,6 +1678,14 @@ class ClientSession(BaseSession):
                 pass
         if ext:
             self.log("%d fichier(s)/texture(s) recu(s) avec la scene" % len(ext))
+        self.stream_total = sum(i["size"] for i in self.incoming.values())
+        self.stream_got = 0
+        if self.incoming:
+            self.log("%d texture(s) en cours de reception apres la scene" % len(self.incoming))
+        try:
+            filecache.trim(root_dir(), keep=received + list(getattr(self, "local_files", {}).values()))
+        except OSError:
+            pass
         return px
 
     # ------------------------------------------------------------------
@@ -1546,6 +1732,8 @@ class ClientSession(BaseSession):
 # ===========================================================================
 
 PORT_TRIES = 10
+STREAM_MIN = 8 * 1024 * 1024       # au-dela, les textures manquantes partent apres la scene
+STREAM_CHUNK = 512 * 1024
 
 
 def port_in_use(exc):

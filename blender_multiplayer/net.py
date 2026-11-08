@@ -28,11 +28,30 @@ class ProtocolError(Exception):
     pass
 
 
+_SAMPLE = 64 * 1024
+
+
+def _compressible(body):
+    """Estime sur quelques echantillons si zlib reduira vraiment le corps : les
+    .blend (deja compresses) et les textures PNG/JPG ne gagnent rien, et
+    compresser 200 Mo pour rien coutait plusieurs secondes."""
+    n = len(body)
+    if n <= 4 * _SAMPLE:
+        return True
+    raw = packed = 0
+    for i in range(4):
+        start = (n - _SAMPLE) * i // 3
+        chunk = body[start:start + _SAMPLE]
+        raw += len(chunk)
+        packed += len(zlib.compress(chunk, 1))
+    return packed < raw * 0.8
+
+
 def encode(msg, binary=b""):
     js = json.dumps(msg, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     body = js + binary if binary else js
     flags = 0
-    if len(body) > 4096:
+    if len(body) > 4096 and _compressible(body):
         z = zlib.compress(body, 1)
         if len(z) < len(body) * 0.9:
             body = z
@@ -62,6 +81,7 @@ class Connection:
         self.cid = cid
         self.inbox = inbox
         self.out = queue.Queue()
+        self.bulk = queue.Queue()      # gros envois (textures) : seulement quand `out` est vide
         self.alive = True
         self._lock = threading.Lock()
         self._dead_reported = False
@@ -93,6 +113,12 @@ class Connection:
         if self.alive:
             self.out.put((msg, binary))
 
+    def send_bulk(self, msg, binary=b""):
+        """Envoi en arriere-plan : passe apres tous les messages normaux, pour que
+        les modifications et les positions ne restent pas bloquees derriere."""
+        if self.alive:
+            self.bulk.put((msg, binary))
+
     def close_after_flush(self):
         if self.alive:
             self.out.put(_CLOSE)
@@ -119,7 +145,16 @@ class Connection:
         reason = "erreur d'envoi"
         try:
             while self.alive:
-                item = self.out.get()
+                try:
+                    item = self.out.get_nowait()
+                except queue.Empty:
+                    try:
+                        item = self.bulk.get_nowait()
+                    except queue.Empty:
+                        try:
+                            item = self.out.get(timeout=0.25)
+                        except queue.Empty:
+                            continue
                 if item is None:
                     break
                 if item is _CLOSE:

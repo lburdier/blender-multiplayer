@@ -6,7 +6,7 @@ Ouvrir la barre laterale de la vue 3D (touche N) > onglet "Multijoueur".
 bl_info = {
     "name": "Blender Multiplayer",
     "author": "Maxence Marrot",
-    "version": (1, 6, 1),
+    "version": (1, 7, 0),
     "blender": (4, 2, 0),
     "doc_url": "https://github.com/lburdier/blender-multiplayer",
     "location": "Vue 3D > Barre laterale (N) > Multijoueur",
@@ -16,7 +16,7 @@ bl_info = {
 
 if "bpy" in locals():
     import importlib
-    for _m in ("compat", "net", "ids", "payloads", "fingerprint", "serialize", "tracker",
+    for _m in ("compat", "net", "ids", "payloads", "fingerprint", "serialize", "live", "tracker",
                "history", "presence", "smooth", "tunnel", "invite", "session", "updater", "prefs",
                "operators", "ui"):
         if _m in locals():
@@ -25,7 +25,7 @@ if "bpy" in locals():
 import bpy
 from bpy.app.handlers import persistent
 
-from . import (compat, fingerprint, history, ids, invite, net, operators, payloads, prefs,
+from . import (compat, fingerprint, history, ids, invite, live, net, operators, payloads, prefs,
                presence, serialize, session, smooth, tracker, tunnel, ui, updater)
 
 

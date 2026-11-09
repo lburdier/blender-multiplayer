@@ -17,7 +17,7 @@ import bpy
 DRIVER = os.environ.get("MP_M_DRIVER", "host")
 DRAG_S = float(os.environ.get("MP_M_SECONDS", "3"))
 FPS = 30.0
-MESHES = ("Cube8", "Sphere20k", "Grille200k", "FormeCle")
+MESHES = ("Cube8", "Sphere20k", "Grille200k", "FormeCle", "Topo")
 CASES = MESHES + ("Materiau", "Modificateur")
 
 
@@ -35,6 +35,8 @@ def build_scene():
     key = obj.shape_key_add(name="Forme")
     key.value = 1.0
     obj.active_shape_key_index = 1
+    bpy.ops.mesh.primitive_cube_add(location=(-5, 0, 0))
+    bpy.context.object.name = "Topo"
     bpy.ops.mesh.primitive_cube_add(location=(5, 5, 0))
     obj = bpy.context.object
     obj.name = "Materiel"
@@ -81,6 +83,12 @@ def drag(T, case, base):
         bpy.context.view_layer.objects.active = obj
         bpy.ops.object.mode_set(mode="EDIT")
         T.pump(1.5)     # le verrou arrive chez l'autre joueur
+        if case == "Topo":      # la topologie change juste avant le geste
+            bm = bmesh.from_edit_mesh(obj.data)
+            bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=1, use_grid_fill=True)
+            bmesh.update_edit_mesh(obj.data)
+            obj.data.update_tag()
+            T.pump(1.5)
     log = []
     end = time.time() + DRAG_S
     i = 0
@@ -93,9 +101,28 @@ def drag(T, case, base):
     return log
 
 
-def driver(T):
+def vertex_count(case):
+    return len(bpy.data.objects[case].data.vertices) if case in MESHES else 0
+
+
+def stale_normals(case):
+    """Faces dont la normale ne correspond pas aux sommets evalues (cache perime, shading lisse)."""
+    ev = bpy.data.objects[case].evaluated_get(bpy.context.evaluated_depsgraph_get())
+    me = ev.data
+    bad = 0
+    corners = me.corner_normals
+    for p in me.polygons:
+        pts = [me.vertices[v].co for v in p.vertices]
+        n = sum(((a.cross(b)) for a, b in zip(pts, pts[1:] + pts[:1])), pts[0] * 0).normalized()
+        if (n - p.normal).length > 1e-3 or any((corners[i].vector - n).length > 1e-3 for i in p.loop_indices):
+            bad += 1
+    return bad
+
+
+def driver(T, sent, phase):
     for n, case in enumerate(CASES):
         t0 = time.time()
+        phase[0] = case
         log = drag(T, case, 0.1 + n * 0.05)
         with open(os.path.join(T.OUT, "tx_%s.json" % case), "w") as fh:
             json.dump(log, fh)
@@ -105,7 +132,11 @@ def driver(T):
             bpy.ops.object.mode_set(mode="OBJECT")
             T.pump(2.5)
         final = read(case)
-        T.say("FIN_%s %s" % (case, final))
+        heavy = [x for x in sent if x[0] == case and set(x[2] or ()) & {"geom", "blob", "fp"}]
+        limit = 3 if case == "Topo" else 1
+        T.check("%s : une seule operation complete pour tout le geste" % case, len(heavy) <= limit, heavy)
+        phase[0] = "run"
+        T.say("FIN_%s %s %d" % (case, final, vertex_count(case)))
         T.barrier("FIN_OK_" + case, 60)
         T.log("%s : %.1f s" % (case, time.time() - t0))
 
@@ -114,6 +145,7 @@ def viewer(T, sent):
     s = T.session.current
     for case in CASES:
         seen = []
+        stale = None
         last = read(case)
         marker = "TX_" + case
         while not T.seen(marker):
@@ -122,6 +154,8 @@ def viewer(T, sent):
             if value != last:
                 seen.append((time.time(), value))
                 last = value
+                if case == "Cube8" and len(seen) == 30:
+                    stale = stale_normals(case)     # en plein geste, avant l'etat complet
         T.pump(1.0)
         with open(os.path.join(T.OUT, "tx_%s.json" % case)) as fh:
             tx = json.load(fh)
@@ -138,15 +172,21 @@ def viewer(T, sent):
         T.RESULTS.setdefault("latence", {})[case] = res
         T.log("LATENCE", case, res)
         T.check("%s : mises a jour recues pendant le glissement" % case, ok, res)
+        if case == "Cube8":
+            T.check("normales recalculees pendant le geste (cube toujours plat)", stale == 0, stale)
         T.say("RX_" + case)
         marker = "FIN_%s " % case
         T.wait_for(lambda: any(str(c.get("text", "")).startswith(marker) for c in s.chat), 60, marker)
         T.pump(1.0)
-        want = next(float(c["text"].split()[1]) for c in s.chat if str(c.get("text", "")).startswith(marker))
+        parts = next(c["text"].split() for c in s.chat if str(c.get("text", "")).startswith(marker))
+        want = float(parts[1])
+        T.check("%s : meme nombre de sommets" % case, int(parts[2]) == vertex_count(case),
+                "%s / %s" % (parts[2], vertex_count(case)))
         got = read(case)
         T.check("%s : valeur finale identique" % case, abs(got - want) < 1e-3, "%s / %s" % (want, got))
         T.say("FIN_OK_" + case)
-    echo = [x for x in sent if x[0] != "join"]
+    # "Material" (materiau d'usine, jamais touche ici) part une fois chez l'hote, deja en 1.6.1.
+    echo = [x for x in sent if x[0] != "join" and x[1] != "Material"]
     T.log("ENVOIS", echo[:30])
     T.check("aucun renvoi (anti-echo)", not echo, echo[:10])
 

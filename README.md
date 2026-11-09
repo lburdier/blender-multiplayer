@@ -56,6 +56,7 @@ Le lien est **privé** : il contient l'adresse de la session et son mot de passe
 
 - Objets : création, suppression, transformations (envoyées 60 fois par seconde pendant un déplacement, avec un **glissement fluide** chez les autres au lieu de sauts), parents, visibilité, modificateurs (Geometry Nodes avec leurs entrées compris), contraintes, emplacements de matériaux, groupes de vertex, pose des armatures, propriétés personnalisées.
 - Maillages : géométrie complète et attributs (UV, couleurs, arêtes vives, index de matériau…), **en direct pendant le mode Édition**, avec un aller-retour bit à bit identique.
+- **Canal temps réel** : pendant un geste, seuls les sommets déplacés (mode Édition, Sculpt) et les valeurs des nodes des matériaux et mondes changés sont envoyés, à chaque image. L'état complet part à la fin du geste : il devient la référence et une seule entrée d'historique. Tous les joueurs doivent avoir la version 1.7.0 ou plus pour en profiter.
 - **Textures** :
   - les fichiers d'image utilisés par la scène sont **envoyés avec elle** à l'arrivée d'un joueur, y compris les tuiles **UDIM**, ainsi que les polices, sons, vidéos, VDB, Alembic et bibliothèques `.blend` liées ;
   - quand il y a beaucoup de textures à envoyer (plus de 8 Mo), **la scène arrive d'abord** et l'invité peut travailler tout de suite ; les textures suivent en arrière-plan, sans retarder les modifications des autres, et s'affichent au fur et à mesure (avancement dans la barre d'état) ;
@@ -136,6 +137,9 @@ MP_SCENE="<scene.blend>" python tests/run_integration.py "<hôte>" "<client>" 57
 MP_SCENE="<JC_Commander_Rig.blend>" MP_K_ADDON="<dossier>" python tests/run_integration.py "<hôte>" "<client>" 57150 K
 # Shading, UV, couleurs et index de matériau d'un maillage vus par l'autre joueur pendant le mode Édition
 python tests/run_integration.py "<hôte>" "<client>" 57160 L
+# Latence de bout en bout (mode Édition, cles de forme, topologie, matériau, modificateur)
+# MP_M_DRIVER=client : c'est l'invité qui fait le geste
+python tests/run_integration.py "<hôte>" "<client>" 57170 M
 # Compatibilité avec une autre version de l'addon : MP_HOST_ROOT / MP_CLIENT_ROOT = dossier contenant blender_multiplayer
 ```
 

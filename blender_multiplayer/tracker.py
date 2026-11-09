@@ -11,7 +11,7 @@ import time
 
 import bpy
 
-from . import animmask, compat, ids, payloads, serialize, smooth
+from . import animmask, compat, ids, live, payloads, serialize, smooth
 
 
 class Tracker:
@@ -55,6 +55,7 @@ class Tracker:
         self.drv_targets = {}  # pointeur d'ID -> [heure, pointeurs des cibles de ses drivers]
         self.waiting = {}      # uid -> heure ou sa lecture a ete repoussee faute de budget
         self.smoother = smooth.Smoother(self)
+        self.live = live.Live(self)
         try:
             from . import prefs
             self.smoother.enabled = bool(getattr(prefs.get(), "smooth_motion", True))
@@ -268,6 +269,7 @@ class Tracker:
             flags = self.dirty.setdefault(uid, set())
             if uid not in self.ignore_next:
                 self.mode_activity.add(uid)
+                self.live.activity.add(uid)
             geom = getattr(upd, "is_updated_geometry", False)
             if isinstance(orig, bpy.types.Object):
                 # Un objet qui ne fait que bouger (ou suit son parent / une
@@ -340,6 +342,8 @@ class Tracker:
             locked_by_me.add(ouid)
             if duid:
                 locked_by_me.add(duid)
+            if duid and self.live.holding(duid, now):
+                continue    # geste en cours : le flux temps reel s'en occupe
             last = self.edit_last.get(ouid, 0.0)
             if now - last < interval:
                 continue
@@ -477,6 +481,10 @@ class Tracker:
         moving = {self.uid_ptr.get(u) for u, f in cand.items() if "t" in f or "x" in f}
         for uid, flags in order:
             if uid not in self.known or uid not in self.index:
+                continue
+            if self.live.holding(uid, now, full):
+                if flags != {"r"}:
+                    keep_dirty.setdefault(uid, set()).update(flags)
                 continue
             attr = self.attr_of[uid]
             idb = self.index[uid]
@@ -806,6 +814,7 @@ class Tracker:
             self.scan()
         for uid, attr, f, created in applied:
             self.accept(uid, attr, f, created)
+            self.live.note_remote(uid)
         for uid, targets in glides:
             entry = self.known.get(uid)
             if entry is not None:

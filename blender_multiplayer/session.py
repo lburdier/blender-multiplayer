@@ -27,7 +27,7 @@ import traceback
 
 import bpy
 
-from . import (compat, filecache, history, ids, invite, net, payloads, presence, serialize, smooth,
+from . import (compat, filecache, history, ids, invite, live, net, payloads, presence, serialize, smooth,
                tunnel)
 from . import tracker as tracker_mod
 
@@ -445,6 +445,12 @@ class HostSession(BaseSession):
         self.broadcast({"type": "presence", "u": self.me, "p": pres})
         self._recompute_locks()
 
+    def send_live(self, msg, binary=b""):
+        self.broadcast(msg, binary)
+
+    def live_backlog(self):
+        return max((conn.queued for _cid, conn in self._ready_conns()), default=0)
+
     # ------------------------------------------------------------------
     def _tick(self, now):
         if self.reconcile_pending:
@@ -452,6 +458,8 @@ class HostSession(BaseSession):
         self._process_inbox(now)
         if not self.active:
             return
+        self.tracker.live.flush(now)
+        self.tracker.live.tick(now)
         self.tracker.poll_modes(now, set())
         changes = self.tracker.collect(now)
         if changes:
@@ -519,6 +527,13 @@ class HostSession(BaseSession):
             user["presence"] = msg.get("p", {})
             self.broadcast({"type": "presence", "u": uid, "p": user["presence"]}, exclude=cid)
             self._recompute_locks()
+        elif t == "live":
+            owner = self.locks.get(msg.get("u"))
+            if user.get("role") != "viewer" and (owner is None or owner == uid):
+                self.tracker.live.receive(msg, binary)
+                for _cid, other in self._ready_conns(cid):
+                    if other.queued < live.MAX_QUEUED:
+                        other.send(msg, binary)
         elif t == "chat":
             self.post_chat(uid, msg.get("text", ""))
         elif t == "mark":
@@ -581,7 +596,7 @@ class HostSession(BaseSession):
                            "ver": msg.get("ver", "?"), "presence": {}}
         client["user"] = uid
         client["caps"] = set(str(c) for c in (msg.get("caps") or ())[:20])
-        conn.send({"type": "welcome", "user": uid, "session": self.session_name,
+        conn.send({"type": "welcome", "user": uid, "session": self.session_name, "live": True,
                    "settings": {"sync_frame": self.sync_frame}, "host_ver": compat.VERSION_STR,
                    "hist": self.history.summaries(), "locks": self.locks,
                    "chat": list(self.chat)[-50:]})
@@ -1270,6 +1285,12 @@ class ClientSession(BaseSession):
     def send_presence(self, pres):
         self.send({"type": "presence", "p": pres})
 
+    def send_live(self, msg, binary=b""):
+        self.send(msg, binary)
+
+    def live_backlog(self):
+        return self.conn.queued if self.conn is not None else 0
+
     # ------------------------------------------------------------------
     def _tick(self, now):
         if self.reconcile_pending:
@@ -1284,6 +1305,7 @@ class ClientSession(BaseSession):
                         self.toast("Mode spectateur : la scene ne peut pas etre modifiee.",
                                    (1, 0.6, 0.3))
             else:
+                self.tracker.live.tick(now)
                 self.tracker.poll_modes(now, set())
                 changes = self.tracker.collect(now)
                 if changes:
@@ -1292,6 +1314,7 @@ class ClientSession(BaseSession):
         self._process_inbox(now)
         if not self.active:
             return
+        self.tracker.live.flush(now)
         self._presence_tick(now)
         self._enforce_locks()
         if now - self.ping_t > 2.0:
@@ -1370,6 +1393,8 @@ class ClientSession(BaseSession):
             self.session_name = msg.get("session", "")
             self.sync_frame = bool(msg.get("settings", {}).get("sync_frame"))
             self.host_ver = msg.get("host_ver", "")
+            # Un hote plus ancien ne relaie pas le flux : garder le chemin normal.
+            self.tracker.live.enabled = bool(msg.get("live"))
             for s in msg.get("hist", []):
                 self._update_hist(s)
             self.locks = msg.get("locks", {})
@@ -1384,6 +1409,9 @@ class ClientSession(BaseSession):
             self._on_filechunk(msg, binary)
         elif t == "snapshot":
             self._on_snapshot(msg, binary)
+        elif t == "live":
+            if self.active:
+                self.tracker.live.receive(msg, binary)
         elif t == "op":
             if msg.get("seq", 0) <= self.snap_seq or not self.active:
                 return

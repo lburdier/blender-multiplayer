@@ -18,7 +18,7 @@ try:
     T.barrier("JOINED", 300)
     phase[0] = "run"
     if M.DRIVER == "host":
-        M.driver(T)
+        M.driver(T, sent, phase)
     else:
         M.viewer(T, sent)
     T.say("END_H")

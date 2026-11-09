@@ -23,7 +23,7 @@ try:
     phase[0] = "run"
     T.say("JOINED")
     if M.DRIVER == "client":
-        M.driver(T)
+        M.driver(T, sent, phase)
     else:
         M.viewer(T, sent)
     T.barrier("END_H", 60)

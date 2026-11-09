@@ -48,6 +48,12 @@ class MP_AddonPreferences(bpy.types.AddonPreferences):
                           description="Relais TCP compatible bore utilise pour rendre la session "
                                       "joignable par Internet (bore.pub est public et gratuit ; "
                                       "vous pouvez heberger le votre avec 'bore server')")
+    web_tunnel: BoolProperty(name="Voie HTTPS (port 443)", default=True,
+                             description="En plus du relais, ouvre un tunnel Cloudflare gratuit "
+                                         "(trycloudflare.com) : les invites sur un reseau filtre "
+                                         "(ecole, entreprise, Wi-Fi public) peuvent quand meme "
+                                         "rejoindre. Le programme cloudflared (~55 Mo) est "
+                                         "telecharge une fois chez l'hote")
     history_limit: IntProperty(name="Actions conservees dans l'historique", default=500, min=0,
                                max=100000,
                                description="Au-dela, les actions les plus anciennes expirent (plus "
@@ -90,6 +96,7 @@ class MP_AddonPreferences(bpy.types.AddonPreferences):
         box = layout.box()
         box.label(text="Internet", icon="WORLD")
         box.prop(self, "relay")
+        box.prop(self, "web_tunnel")
         if not getattr(bpy.app, "online_access", True):
             box.prop(context.preferences.system, "use_online_access",
                      text="Autoriser l'acces en ligne (requis pour Internet et les mises a jour)")
@@ -118,6 +125,7 @@ class _Defaults:
     show_cursors = True
     show_toasts = True
     relay = "bore.pub:7835"
+    web_tunnel = True
     history_limit = 500
     archive_on_expire = True
     smooth_motion = True

@@ -25,9 +25,21 @@ try:
         T.check("lien d'invitation lisible", link is not None and link["password"] == "secret", link)
         # On ne garde que l'adresse Internet pour tester vraiment le relais.
         pub = [a for a in link["addresses"] if a[0] == "bore.pub"]
+        if T.VIA == "web":
+            pub = [a for a in link["addresses"] if a[0].startswith("wss://")]
         T.check("lien avec adresse Internet", len(pub) == 1, link["addresses"])
+        if T.VIA == "blocked":
+            # Reseau filtre : tout le lien, mais les adresses non HTTPS ne repondent jamais
+            # (10.255.255.1 : aucun paquet ne revient, comme un port bloque par un pare-feu).
+            pub = [a if a[0].startswith("wss://") else ("10.255.255.1", a[1])
+                   for a in link["addresses"]]
+            T.check("lien avec voie HTTPS", any(a[0].startswith("wss://") for a in pub), pub)
+        t0 = time.time()
         s = session.join_any(pub, link["password"], username="Client")
-        T.log("connecte via", pub)
+        T.log("connexion ouverte en %.2f s" % (time.time() - t0))
+        T.check("connexion rapide malgre les adresses bloquees", time.time() - t0 < 5.0,
+                "%.2f s" % (time.time() - t0))
+        T.log("connecte via", s.address, s.port)
     for _ in range(40):
         if s is not None:
             break

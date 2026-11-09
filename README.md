@@ -50,6 +50,8 @@ Le lien est **privé** : il contient l'adresse de la session et son mot de passe
 
 - **Réseau local** : adresse IP de l'hôte (ex. `192.168.1.20`), port `5555` par défaut. Le lien d'invitation essaie d'abord le réseau local, puis Internet.
 - **Par Internet** : la case *Accessible par Internet* ouvre un tunnel vers un relais TCP public ([bore](https://github.com/ekzhang/bore), serveur `bore.pub`) ; aucun réglage de box n'est nécessaire. Le relais est modifiable dans les préférences (vous pouvez héberger le vôtre avec `bore server`). Un VPN de jeu (Tailscale, ZeroTier…) ou une redirection de port restent possibles.
+- **Réseau filtré (école, entreprise, Wi-Fi public)** : ces réseaux ne laissent souvent sortir que le web, et le port au hasard de `bore.pub` (ex. `42304`) y est bloqué ; l'invité voyait alors « l'hôte ne répond pas » partout. Depuis la 1.7.1, l'hôte ouvre aussi une **voie HTTPS** (port 443) par un tunnel rapide Cloudflare gratuit (`trycloudflare.com`, sans compte). Le programme officiel `cloudflared` (~55 Mo) est téléchargé une seule fois chez l'hôte ; l'invité n'a rien à installer. L'adresse `wss://….trycloudflare.com` est ajoutée au lien d'invitation (ligne *HTTPS* du panneau) : attendez qu'elle s'affiche avant de copier le lien. Désactivable dans les préférences (*Voie HTTPS*).
+- L'invité essaie **toutes les adresses du lien en même temps** et garde la première qui répond (avant : une par une, jusqu'à 15 s d'attente).
 - `127.0.0.1` désigne **votre propre PC** : ce n'est pas l'adresse à utiliser pour rejoindre quelqu'un d'autre.
 
 ## Ce qui est synchronisé
@@ -108,7 +110,7 @@ L'hôte peut **restaurer** n'importe quelle sauvegarde : tous les joueurs sont r
 - **Fusion par propriété** : deux joueurs qui modifient des propriétés différentes d'un même objet ne s'écrasent jamais.
 - **Identité stable** : chaque data-block porte un identifiant caché (`_mp_uid`) qui survit aux renommages, à la sauvegarde, au chargement ; les doublons (Maj+D) sont détectés.
 - **Sans écho** : l'état relu après application d'un changement distant devient l'état connu, il n'est jamais renvoyé. Les valeurs animées ou pilotées par des drivers ne sont pas diffusées : chaque joueur les calcule lui-même (changer de frame ne crée aucune opération). Seule la valeur pilotée est ignorée, pas tout le champ : un os ou une propriété non pilotés du même rig restent diffusés, et une f-curve coupée (*mute*) par un addon rend la valeur à la main. Les matériaux, maillages à clés de forme et lumières recalculés par leurs drivers ne sont ni relus ni renvoyés.
-- Réseau : TCP, trames binaires compressées, aucune dépendance externe (uniquement la bibliothèque standard de Python et numpy, fourni avec Blender). Tunnel Internet : client du protocole bore écrit en Python pur.
+- Réseau : TCP, trames binaires compressées, aucune dépendance externe (uniquement la bibliothèque standard de Python et numpy, fourni avec Blender). Tunnel Internet : client du protocole bore écrit en Python pur ; voie HTTPS : WebSocket (RFC 6455) en Python pur, côté hôte un pont local derrière `cloudflared`, côté invité une connexion TLS ordinaire (résolution DNS-over-HTTPS si le DNS local ne connaît pas encore l'adresse toute neuve).
 - Publication : à chaque version GitHub, une action GitHub régénère le dépôt d'extensions (`index.json`, même format que `blender --command extension server-generate`) et le site sur GitHub Pages.
 
 ## Limites connues
@@ -128,6 +130,8 @@ python tests/run_integration.py "<blender hôte>" "<blender client>" 57123      
 python tests/run_integration.py "<blender hôte>" "<blender client>" 57124 2    # scénario 2 (types de données)
 python tests/run_integration.py "<blender hôte>" "<blender client>" 57126 3    # scénario 3 (textures, lumières, rendu, fluidité, expiration)
 MP_TEST_ONLINE=1 python tests/run_integration.py "<hôte>" "<client>" 57125     # scénario 1 via le relais Internet et le lien d'invitation
+MP_TEST_ONLINE=1 MP_TEST_VIA=web python tests/run_integration.py "<hôte>" "<client>" 57127      # ... uniquement par la voie HTTPS (Cloudflare)
+MP_TEST_ONLINE=1 MP_TEST_VIA=blocked python tests/run_integration.py "<hôte>" "<client>" 57128  # ... réseau filtré : seule la voie HTTPS répond
 python tests/run_update_test.py "<blender>" dist/blender_multiplayer-x.y.z.zip  # mise à jour automatique (zip et dépôt distant)
 python tests/run_update_gui_test.py "<blender>" dist/blender_multiplayer-x.y.z.zip  # mise à jour au démarrage (Blender ouvert sur un .blend)
 # Temps d'arrivée d'un invité sur une vraie scène (MP_J_NOHINT=1 : comme sur deux PC, MP_J_REJOIN=1 : 2e connexion)

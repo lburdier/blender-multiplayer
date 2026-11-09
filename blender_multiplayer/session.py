@@ -28,7 +28,7 @@ import traceback
 import bpy
 
 from . import (compat, filecache, history, ids, invite, live, net, payloads, presence, serialize, smooth,
-               tunnel)
+               tunnel, webtunnel)
 from . import tracker as tracker_mod
 
 current = None
@@ -61,6 +61,14 @@ def _stamp():
 
 def _safe(name):
     return re.sub(r"[^A-Za-z0-9_\-]+", "_", name).strip("_") or "session"
+
+
+def bin_dir():
+    """Programmes telecharges (cloudflared) : hors du dossier des sessions."""
+    try:
+        return bpy.utils.extension_path_user(__package__, path="bin", create=True)
+    except Exception:  # noqa: BLE001  (Blender < 4.2, installation en addon classique)
+        return os.path.join(root_dir(), "bin")
 
 
 def root_dir():
@@ -330,8 +338,10 @@ class HostSession(BaseSession):
         self.next_user = 2
         self.history = None
         self.tunnel = None
+        self.web = None            # voie HTTPS (port 443) : passe les reseaux filtres
         self.password_generated = False
         self._tunnel_seen = (None, 0)
+        self._web_seen = (None, 0)
         self.autosave_t = time.time()
         self.autosave_seq = 0
         self.flush_t = time.time()
@@ -356,6 +366,11 @@ class HostSession(BaseSession):
         self.server, self.port = open_server(self.requested_port, self.inbox)
         if online:
             self.tunnel = tunnel.Tunnel(self.port, relay or tunnel.DEFAULT_RELAY)
+            if getattr(_prefs(), "web_tunnel", True):
+                try:
+                    self.web = webtunnel.WebTunnel(self.port, bin_dir())
+                except OSError as exc:
+                    self.log("voie HTTPS: %s" % exc)
         self.tracker.init_known(write_blobs=True)
         try:
             compat.save_copy(os.path.join(self.session_dir, "checkpoints", "00_depart.blend"))
@@ -389,6 +404,9 @@ class HostSession(BaseSession):
     def public_address(self):
         return self.tunnel.public_address if self.tunnel is not None else ""
 
+    def web_address(self):
+        return self.web.public_address if self.web is not None else ""
+
     def invite_addresses(self):
         """Adresses a essayer par l'invite : reseau local principal (delai court),
         puis Internet, puis les autres adresses locales."""
@@ -398,6 +416,9 @@ class HostSession(BaseSession):
         if pub:
             host, _, port = pub.rpartition(":")
             out.append((host, int(port)))
+        web = self.web_address()
+        if web:
+            out.append((web, 443))
         out.extend(lan[1:3])
         return out
 
@@ -424,6 +445,25 @@ class HostSession(BaseSession):
             self.toast("Adresse Internet indisponible (%s), nouvel essai..." % t.error, (1, 0.7, 0.3))
             self.log("tunnel: %s" % t.error)
             compat.tag_redraw()
+
+    def _web_tick(self):
+        w = self.web
+        if w is None:
+            return
+        seen = (w.state, w.generation)
+        if w.state == "download":
+            seen = (w.state, int(w.progress * 20))
+        if seen == self._web_seen:
+            return
+        prev_state, prev_gen = self._web_seen
+        self._web_seen = seen
+        compat.tag_redraw()
+        if w.state == "open":
+            if prev_gen and w.generation != prev_gen:
+                self.toast("Adresse HTTPS changee : recopiez le lien d'invitation.", (1, 0.8, 0.3))
+            self.log("voie HTTPS ouverte: %s" % w.public_address)
+        elif w.state == "retry" and prev_state != "retry":
+            self.log("voie HTTPS: %s" % w.error)
 
     # ------------------------------------------------------------------
     def _ready_conns(self, exclude=None):
@@ -470,6 +510,7 @@ class HostSession(BaseSession):
         self._enforce_locks()
         self._autosave_tick(now)
         self._tunnel_tick()
+        self._web_tick()
         self._expire_tick(now)
         if now - self.flush_t > 3.0:
             self.flush_t = now
@@ -1220,6 +1261,8 @@ class HostSession(BaseSession):
             self.log("arret: %s" % exc)
         if self.tunnel is not None:
             self.tunnel.stop()
+        if self.web is not None:
+            self.web.stop()
         if self.server is not None:
             time.sleep(0.1)
             self.server.stop()
@@ -1251,14 +1294,14 @@ class ClientSession(BaseSession):
         self.host_ver = ""
         self.snapshot_size = 0
 
-    def connect(self, address, port, password="", timeout=8.0):
+    def connect(self, address, port, password="", timeout=8.0, sock=None):
         global current
         self.address = address
         self.port = int(port)
         self.password = password or ""
         self.session_dir = os.path.join(root_dir(), "joined", "%s_%s" % (_safe(address), _stamp()))
         os.makedirs(self.session_dir, exist_ok=True)
-        self.conn = net.connect(address, self.port, self.inbox, timeout=timeout)
+        self.conn = net.connect(address, self.port, self.inbox, timeout=timeout, sock=sock)
         self.state = "auth"
         current = self
         self._start_timer()
@@ -1785,7 +1828,7 @@ def open_server(port, inbox):
 
 
 _ORPHAN_SESSIONS = ("HostSession", "ClientSession")
-_ORPHAN_TRANSPORTS = ("Server", "Tunnel")
+_ORPHAN_TRANSPORTS = ("Server", "Tunnel", "WebTunnel")
 
 
 def stop_orphans():
@@ -1797,7 +1840,8 @@ def stop_orphans():
     cur = current
     keep = set()
     if cur is not None:
-        keep = {id(cur), id(getattr(cur, "server", None)), id(getattr(cur, "tunnel", None))}
+        keep = {id(cur), id(getattr(cur, "server", None)), id(getattr(cur, "tunnel", None)),
+                id(getattr(cur, "web", None))}
     found = [o for o in gc.get_objects()
              if type(o).__name__ in _ORPHAN_SESSIONS + _ORPHAN_TRANSPORTS
              and "blender_multiplayer" in (type(o).__module__ or "") and id(o) not in keep]
@@ -1836,34 +1880,104 @@ def host(port, password="", session_name="Session", username=None, color=None, s
         current = None
         if s.tunnel is not None:
             s.tunnel.stop()
+        if s.web is not None:
+            s.web.stop()
         if s.server is not None:
             s.server.stop()
         raise
     return s
 
 
-def join(address, port, password="", username=None, color=None, viewer=False):
+def open_socket(address, port, timeout=None):
+    """Connexion brute vers une adresse d'invitation : TCP direct, ou voie
+    HTTPS (wss://...) qui renvoie une socket equivalente."""
+    if webtunnel.is_web_address(address):
+        return webtunnel.connect(address, timeout or 12.0)
+    import socket
+    return socket.create_connection((address, int(port)),
+                                    timeout=timeout or invite.connect_timeout(address))
+
+
+def join(address, port, password="", username=None, color=None, viewer=False, sock=None):
     global current, last_reason
     last_reason = ""
+    if sock is None:
+        sock = open_socket(address, port)
     if current is not None:
         current.stop("nouvelle session")
     stop_orphans()
     p = _prefs()
     s = ClientSession(username or p.username or "Joueur", color or tuple(p.color), viewer=viewer)
-    s.connect(address, port, password, timeout=invite.connect_timeout(address))
+    try:
+        s.connect(address, port, password, sock=sock)
+    except Exception:
+        sock.close()
+        raise
     return s
 
 
-def join_any(addresses, password="", username=None, color=None, viewer=False):
-    """Essaie chaque adresse (hote, port) dans l'ordre ; renvoie la session
-    connectee ou leve OSError avec le detail de chaque essai."""
-    errors = []
-    for address, port in addresses:
+def race(addresses, open_fn=None):
+    """Essaie toutes les adresses EN MEME TEMPS ; renvoie (adresse, port, socket)
+    de la premiere qui repond (les autres sont fermees), ou leve OSError avec le
+    detail de chaque essai. Avant : une par une, jusqu'a 15 s d'attente."""
+    import threading
+    open_fn = open_fn or open_socket
+    results = queue.Queue()
+    lock = threading.Lock()
+    won = []
+
+    def attempt(i, address, port):
         try:
-            return join(address, port, password, username=username, color=color, viewer=viewer)
-        except OSError as exc:
-            errors.append("%s:%d (%s)" % (address, port, describe_error(exc, address)))
-    raise OSError("aucune adresse ne repond : " + " ; ".join(errors))
+            sk = open_fn(address, port)
+        except Exception as exc:  # noqa: BLE001
+            results.put((i, address, port, None, exc))
+            return
+        with lock:
+            if won:
+                try:
+                    sk.close()
+                except OSError:
+                    pass
+                return
+            won.append(i)
+        results.put((i, address, port, sk, None))
+
+    addresses = list(addresses)
+    for i, (address, port) in enumerate(addresses):
+        threading.Thread(target=attempt, args=(i, address, port), daemon=True,
+                         name="mp-join-try").start()
+    errors = {}
+    while len(errors) < len(addresses):
+        try:
+            i, address, port, sk, exc = results.get(timeout=90)
+        except queue.Empty:
+            raise OSError("aucune adresse ne repond (delai depasse)")
+        if sk is not None:
+            return address, port, sk
+        errors[i] = "%s (%s)" % (_shown(address, port), describe_error(exc, address))
+    raise OSError("aucune adresse ne repond : " + " ; ".join(errors[i] for i in sorted(errors))
+                  + _diagnose(addresses))
+
+
+def _shown(address, port):
+    return address if webtunnel.is_web_address(address) else "%s:%d" % (address, port)
+
+
+def _diagnose(addresses):
+    """Piste quand tout a echoue et que le lien n'a pas de voie HTTPS."""
+    has_web = any(webtunnel.is_web_address(a) for a, _p in addresses)
+    if not has_web and any(not invite.is_private(a) and not a.startswith(("100.", "127."))
+                           for a, _p in addresses):
+        return (". Si votre reseau (ecole, entreprise, Wi-Fi public) bloque les ports "
+                "inhabituels : l'hote doit mettre l'addon a jour (1.7.1 ou plus) et vous "
+                "renvoyer un lien, qui passera aussi par le port HTTPS 443")
+    return ""
+
+
+def join_any(addresses, password="", username=None, color=None, viewer=False):
+    """Connecte la premiere adresse qui repond ; renvoie la session."""
+    address, port, sk = race(addresses)
+    return join(address, port, password, username=username, color=color, viewer=viewer, sock=sk)
 
 
 def describe_error(exc, address=""):
@@ -1874,9 +1988,13 @@ def describe_error(exc, address=""):
             msg += " (127.0.0.1 designe votre propre PC : utilisez le lien ou l'adresse de l'hote)"
         return msg
     if isinstance(exc, (TimeoutError, socket_timeout())):
-        return "l'hote ne repond pas (pas sur le meme reseau ? utilisez le lien d'invitation)"
+        if webtunnel.is_web_address(address):
+            return "pas de reponse par HTTPS (connexion Internet coupee ?)"
+        if invite.is_private(address) or address.startswith("100."):
+            return "injoignable (normal si vous n'etes pas sur le reseau de l'hote)"
+        return "l'hote ne repond pas (reseau qui bloque ce port, ou hote parti)"
     if isinstance(exc, OSError) and getattr(exc, "errno", None) in (11001, -2, -3, 8):
-        return "adresse introuvable"
+        return "adresse introuvable" + (" (session fermee ou lien perime)" if webtunnel.is_web_address(address) else "")
     return str(exc)
 
 

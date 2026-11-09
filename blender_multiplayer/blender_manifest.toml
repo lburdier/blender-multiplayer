@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "blender_multiplayer"
-version = "1.7.0"
+version = "1.7.1"
 name = "Blender Multiplayer"
 tagline = "Edition collaborative en temps reel de la meme scene a plusieurs"
 maintainer = "Maxence Marrot"
@@ -15,8 +15,8 @@ blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
-network = "Synchronisation de la scene entre les joueurs (TCP)"
-files = "Autosauvegardes, sauvegardes et historique de session"
+network = "Synchronisation de la scene entre les joueurs (TCP, relais bore.pub, tunnel HTTPS Cloudflare)"
+files = "Autosauvegardes, sauvegardes, historique de session et programme cloudflared (hote en ligne)"
 
 [build]
 paths_exclude_pattern = ["__pycache__/", "/.git/", "*.zip"]

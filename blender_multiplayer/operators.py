@@ -124,9 +124,13 @@ class MP_OT_copy_invite(bpy.types.Operator):
         if s is None or not s.is_host:
             return {"CANCELLED"}
         context.window_manager.clipboard = s.invite_link()
-        if s.tunnel is not None and not s.public_address():
+        if s.tunnel is not None and not s.public_address() and not s.web_address():
             self.report({"WARNING"}, "Lien copie, mais l'adresse Internet n'est pas encore prete : "
                                      "il ne marche pour l'instant que sur votre reseau local.")
+        elif getattr(s, "web", None) is not None and not s.web_address():
+            self.report({"WARNING"}, "Lien copie sans la voie HTTPS (pas encore prete) : un invite "
+                                     "sur un reseau filtre (ecole, entreprise) ne pourra pas "
+                                     "entrer. Recopiez le lien dans quelques secondes.")
         else:
             self.report({"INFO"}, "Lien d'invitation copie : envoyez-le aux joueurs.")
         return {"FINISHED"}

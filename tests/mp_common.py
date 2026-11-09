@@ -23,6 +23,8 @@ RESULTS = {"checks": [], "errors": []}
 # MP_TEST_ONLINE=1 : la session passe par le relais Internet (lien d'invitation)
 ONLINE = os.environ.get("MP_TEST_ONLINE") == "1"
 INVITE_FILE = os.path.join(OUT, "invite.txt")
+# MP_TEST_VIA=web : l'invite n'utilise que la voie HTTPS (reseau qui bloque bore.pub)
+VIA = os.environ.get("MP_TEST_VIA", "bore")
 ROLE = "?"
 
 

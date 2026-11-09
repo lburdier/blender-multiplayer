@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mp_common as T  # noqa: E402
@@ -22,6 +23,11 @@ try:
     if T.ONLINE:
         T.wait_for(lambda: s.public_address(), 30, "adresse Internet")
         T.check("adresse Internet ouverte", bool(s.public_address()), s.tunnel.error)
+        if T.VIA in ("web", "blocked"):
+            t0 = time.time()
+            T.wait_for(lambda: s.web_address(), 240, "voie HTTPS")
+            T.check("voie HTTPS ouverte", bool(s.web_address()), s.web.error if s.web else "absente")
+            T.log("voie HTTPS prete en %.1f s : %s" % (time.time() - t0, s.web_address()))
         with open(T.INVITE_FILE + ".tmp", "w", encoding="utf-8") as fh:
             fh.write(s.invite_link())
         os.replace(T.INVITE_FILE + ".tmp", T.INVITE_FILE)

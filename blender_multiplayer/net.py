@@ -274,8 +274,8 @@ class Server:
         self.conns.clear()
 
 
-def connect(address, port, inbox, timeout=8.0):
-    s = socket.create_connection((address, int(port)), timeout=timeout)
+def connect(address, port, inbox, timeout=8.0, sock=None):
+    s = sock if sock is not None else socket.create_connection((address, int(port)), timeout=timeout)
     s.settimeout(None)
     conn = Connection(s, 0, inbox)
     conn.start()

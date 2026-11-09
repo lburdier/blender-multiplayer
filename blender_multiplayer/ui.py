@@ -119,6 +119,22 @@ class MP_PT_main(bpy.types.Panel):
                               icon="ERROR")
                 else:
                     box.label(text="Ouverture de l'adresse Internet...", icon="TIME")
+            w = getattr(s, "web", None)
+            if w is not None:
+                web = s.web_address()
+                if web:
+                    row = box.row(align=True)
+                    row.label(text="HTTPS : %s" % web[len("wss://"):], icon="LOCKED")
+                    op = row.operator("mp.copy_address", text="", icon="COPYDOWN")
+                    op.address = web
+                elif w.state == "download":
+                    box.label(text="Voie HTTPS : telechargement de cloudflared... %d%%"
+                              % int(w.progress * 100), icon="IMPORT")
+                elif w.state == "retry":
+                    box.label(text="Voie HTTPS indisponible, nouvel essai... (%s)" % w.error[:60],
+                              icon="ERROR")
+                else:
+                    box.label(text="Ouverture de la voie HTTPS...", icon="TIME")
             for ip in net.local_addresses()[:2]:
                 row = box.row(align=True)
                 addr = "%s:%d" % (ip, s.port)

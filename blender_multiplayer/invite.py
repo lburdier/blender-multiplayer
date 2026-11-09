@@ -57,8 +57,16 @@ def parse(text):
 
 
 def parse_address(text, default_port):
-    """'1.2.3.4', '1.2.3.4:5555', 'bore.pub:41234', '[::1]:5555' -> (hote, port)."""
+    """'1.2.3.4', '1.2.3.4:5555', 'bore.pub:41234', '[::1]:5555' -> (hote, port).
+    'wss://abc.trycloudflare.com' ou 'abc.trycloudflare.com' -> voie HTTPS."""
     text = (text or "").strip()
+    low = text.lower()
+    for prefix in ("wss://", "https://", "http://"):
+        if low.startswith(prefix):
+            low = low[len(prefix):]
+    web_host = low.split("/", 1)[0].split(":", 1)[0]
+    if text.lower().startswith("wss://") or web_host.endswith(".trycloudflare.com"):
+        return "wss://" + web_host, 443
     for prefix in ("tcp://", "http://", "https://"):
         if text.lower().startswith(prefix):
             text = text[len(prefix):]

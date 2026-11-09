@@ -18,7 +18,8 @@ DRIVER = os.environ.get("MP_M_DRIVER", "host")
 DRAG_S = float(os.environ.get("MP_M_SECONDS", "3"))
 FPS = 30.0
 MESHES = ("Cube8", "Sphere20k", "Grille200k", "FormeCle", "Topo")
-CASES = MESHES + ("Materiau", "Modificateur")
+CASES = tuple(c for c in os.environ.get("MP_M_CASES", "").split(",") if c) or (
+    ("Objet",) + MESHES + ("Materiau", "Modificateur"))
 
 
 def build_scene():
@@ -44,11 +45,15 @@ def build_scene():
     mat.use_nodes = True
     obj.data.materials.append(mat)
     obj.modifiers.new("Bevel", "BEVEL")
+    bpy.ops.mesh.primitive_cube_add(location=(-5, -5, 0))
+    bpy.context.object.name = "Objet"
     bpy.ops.object.select_all(action="DESELECT")
 
 
 def read(case):
     dg = bpy.context.evaluated_depsgraph_get()
+    if case == "Objet":
+        return round(bpy.data.objects["Objet"].location.z, 4)     # valeur affichee (lissage compris)
     if case in MESHES:
         ev = bpy.data.objects[case].evaluated_get(dg)
         return round(ev.data.vertices[0].co.z, 4)
@@ -60,7 +65,9 @@ def read(case):
 
 
 def _write(case, value, obj):
-    if case in MESHES:
+    if case == "Objet":
+        obj.location.z = value
+    elif case in MESHES:
         bm = bmesh.from_edit_mesh(obj.data)
         bm.verts.ensure_lookup_table()
         bm.verts[0].co.z = value
@@ -76,12 +83,22 @@ def _write(case, value, obj):
 
 def drag(T, case, base):
     """Une valeur differente toutes les 1/30 s. Retourne [(heure, valeur)]."""
-    obj = bpy.data.objects[case if case in MESHES else "Materiel"]
+    obj = bpy.data.objects[case if case in MESHES or case == "Objet" else "Materiel"]
     if case in MESHES:
         bpy.ops.object.select_all(action="DESELECT")
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
         bpy.ops.object.mode_set(mode="EDIT")
+        # Comme un vrai geste : seuls quelques sommets selectionnes bougent
+        # (MP_M_SELECT_ALL=1 : tout est selectionne, relecture complete du maillage).
+        if os.environ.get("MP_M_SELECT_ALL") != "1":
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.verts.ensure_lookup_table()
+            for v in bm.verts:
+                v.select = False
+            bm.verts[0].select = True
+            bm.select_flush(False)
+            bmesh.update_edit_mesh(obj.data)
         T.pump(1.5)     # le verrou arrive chez l'autre joueur
         if case == "Topo":      # la topologie change juste avant le geste
             bm = bmesh.from_edit_mesh(obj.data)

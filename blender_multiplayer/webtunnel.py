@@ -199,20 +199,31 @@ def resolve(host):
     return ip
 
 
+def _nodelay(sock):
+    """Sans TCP_NODELAY, Windows retient les petits messages jusqu'a l'accuse de
+    reception du precedent (Nagle + accuse differe) : jusqu'a 200 ms de plus par
+    deplacement envoye."""
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError:
+        pass
+    return sock
+
+
 def connect(address, timeout=12.0):
     """Ouvre la voie HTTPS vers l'hote et renvoie une socket ordinaire (une
     extremite de socketpair) : le reste de l'addon l'utilise comme une
     connexion TCP directe."""
     host = host_of(address)
     ip = resolve(host)
-    raw = socket.create_connection((ip, 443), timeout=timeout)
+    raw = _nodelay(socket.create_connection((ip, 443), timeout=timeout))
     try:
         tls = _ssl_context().wrap_socket(raw, server_hostname=host)
     except ssl.SSLCertVerificationError:
         # Certificats systeme absents (certains Linux / macOS) : le trajet reste
         # chiffre, et le mot de passe de la session est verifie de toute facon.
         raw.close()
-        raw = socket.create_connection((ip, 443), timeout=timeout)
+        raw = _nodelay(socket.create_connection((ip, 443), timeout=timeout))
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -236,6 +247,8 @@ def connect(address, timeout=12.0):
         raise
     tls.settimeout(None)
     mine, theirs = socket.socketpair()
+    _nodelay(mine)
+    _nodelay(theirs)
     threading.Thread(target=_client_pump, args=(tls, theirs, rest), daemon=True,
                      name="mp-web-client").start()
     return mine
@@ -322,10 +335,7 @@ class _Bridge:
                         % _accept_key(headers["sec-websocket-key"])).encode("ascii"))
             for s in (ws, local):
                 s.settimeout(None)
-                try:
-                    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                except OSError:
-                    pass
+                _nodelay(s)
             lock = threading.Lock()
             threading.Thread(target=self._to_ws, args=(local, ws, lock), daemon=True,
                              name="mp-web-out").start()

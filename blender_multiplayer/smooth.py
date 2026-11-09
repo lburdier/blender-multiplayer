@@ -39,9 +39,11 @@ class Smoother:
         prev = self.last_rx.get(uid)
         self.last_rx[uid] = now
         gap = (now - prev) if prev else 1.0
-        # Duree = intervalle entre messages (mouvement continu) ; bornee pour
-        # rester reactif. Premier message apres une pause : glissement court.
-        dur = 0.08 if gap > 0.5 else min(max(gap * 1.15, 0.035), 0.2)
+        # Duree = intervalle entre messages (mouvement continu) ; bornee a 0,1 s :
+        # sur Internet les messages arrivent par a-coups, et un glissement plus
+        # long ne ferait qu'ajouter du retard. Premier message apres une pause :
+        # glissement court.
+        dur = 0.05 if gap > 0.5 else min(max(gap, 0.02), 0.1)
         taken = []
         for field, target in targets.items():
             try:

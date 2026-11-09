@@ -9,7 +9,14 @@ import m_common as M  # noqa: E402
 T.ROLE = "host"
 try:
     M.build_scene()
-    s = T.session.host(T.PORT, "secret", "Latence", username="Hote")
+    s = T.session.host(T.PORT, "secret", "Latence", username="Hote", online=T.ONLINE)
+    if T.ONLINE:
+        T.wait_for(lambda: s.public_address(), 30, "adresse Internet")
+        if T.VIA in ("web", "all"):
+            T.wait_for(lambda: s.web_address(), 240, "voie HTTPS")
+        with open(T.INVITE_FILE + ".tmp", "w", encoding="utf-8") as fh:
+            fh.write(s.invite_link())
+        os.replace(T.INVITE_FILE + ".tmp", T.INVITE_FILE)
     phase = ["join"]
     sent = M.watch_sends(s.tracker, phase)
     T.pump(1.0)

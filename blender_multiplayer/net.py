@@ -59,6 +59,26 @@ def encode(msg, binary=b""):
     return _HDR.pack(MAGIC, flags, len(js), len(binary), len(body)), body
 
 
+def write_frame(sock, msg, binary=b""):
+    """Une trame sur une socket brute (avant la creation de la Connection)."""
+    hdr, body = encode(msg, binary)
+    sock.sendall(hdr + body)
+
+
+def read_frame(sock):
+    """Lit une trame sur une socket brute ; renvoie (message, piece jointe)."""
+    hdr = _recv_exact(sock, _HDR.size)
+    magic, flags, jl, bl, body_len = _HDR.unpack(hdr)
+    if magic != MAGIC:
+        raise ProtocolError("protocole incompatible")
+    if body_len > MAX_BODY:
+        raise ProtocolError("trame trop grande")
+    body = _recv_exact(sock, body_len)
+    if flags & FLAG_ZLIB:
+        body = zlib.decompress(body)
+    return json.loads(body[:jl].decode("utf-8")), (body[jl:jl + bl] if bl else b"")
+
+
 def _recv_exact(sock, n, progress=None):
     buf = bytearray(n)
     view = memoryview(buf)
@@ -161,8 +181,11 @@ class Connection:
                     reason = "fermeture"
                     break
                 hdr, body = encode(*item)
-                self.sock.sendall(hdr)
-                self.sock.sendall(body)
+                if len(body) < 256 * 1024:
+                    self.sock.sendall(hdr + body)   # un seul paquet : pas de demi-message en route
+                else:
+                    self.sock.sendall(hdr)
+                    self.sock.sendall(body)
                 self.tx_bytes += len(hdr) + len(body)
         except Exception as exc:  # noqa: BLE001
             reason = "envoi: %s" % exc
@@ -189,6 +212,14 @@ class Connection:
                 binary = body[jl:jl + bl] if bl else b""
                 self.last_rx = time.time()
                 self.rx_bytes += len(hdr) + body_len
+                if msg.get("type") == "ping":
+                    # Repondu ici, sans attendre le fil principal de Blender : le ping
+                    # mesure le reseau, et sert a choisir le chemin le plus rapide.
+                    pong = {"type": "pong", "t": msg.get("t")}
+                    if msg.get("probe"):
+                        pong["probe"] = 1
+                    self.send(pong)
+                    continue
                 self.inbox.put((self.cid, msg, binary))
         except Exception as exc:  # noqa: BLE001
             reason = str(exc) or reason
@@ -274,10 +305,13 @@ class Server:
         self.conns.clear()
 
 
-def connect(address, port, inbox, timeout=8.0, sock=None):
+def connect(address, port, inbox, timeout=8.0, sock=None, early=()):
+    """`early` : trames deja lues sur la socket (mesure du chemin), remises en tete."""
     s = sock if sock is not None else socket.create_connection((address, int(port)), timeout=timeout)
     s.settimeout(None)
     conn = Connection(s, 0, inbox)
+    for msg, binary in early:
+        inbox.put((0, msg, binary))
     conn.start()
     return conn
 

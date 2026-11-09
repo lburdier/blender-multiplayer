@@ -29,14 +29,18 @@ SETTLE = 0.35           # silence apres lequel le geste est considere comme fini
 RX_HOLD = 1.5           # detection coupee chez celui qui recoit, le temps de l'etat final
 MAX_QUEUED = 16         # messages en attente au-dela desquels on regroupe les images
 NODE_OWNERS = ("materials", "worlds")
+BIG_EDIT = 30000        # au-dela, pendant un geste, on ne relit que les sommets selectionnes
+SEL_MAX = 60000         # ... s'ils ne sont pas trop nombreux
+SPARSE_MAX = 6000       # a la reception, ecriture sommet par sommet en dessous
 
 
 class _MeshTx:
-    __slots__ = ("base", "next")
+    __slots__ = ("base", "next", "sel")
 
     def __init__(self):
         self.base = None
         self.next = 0.0
+        self.sel = None     # sommets selectionnes du geste en cours (gros maillage)
 
 
 def _read_nodes(tree):
@@ -133,6 +137,8 @@ class Live:
                 continue
             if now < st.next:
                 continue
+            if st.sel is not None and now > self.tx_hold.get(uid, 0.0):
+                st.sel = None   # geste fini : la selection peut avoir change
             self.activity.discard(uid)
             self.activity.discard(ouid)
             t0 = time.perf_counter()
@@ -146,6 +152,11 @@ class Live:
             del self.mesh_tx[uid]
 
     def _read_mesh(self, obj, me, mode, uid, ouid, st, session, now):
+        if mode == "EDIT" and st.sel is not None:
+            sent = self._read_selected(me, uid, st, session, now)
+            if sent is not None:
+                return sent
+            st.sel = None
         if mode == "EDIT":
             obj.update_from_editmode()
             self.tr.ignore_next.add(uid)
@@ -163,6 +174,8 @@ class Live:
         if moved.size == 0:
             return False
         st.base = co
+        if mode == "EDIT" and key is None and n >= BIG_EDIT:
+            st.sel = _selected_if_only(me, n, moved)
         msg = {"type": "live", "w": "m", "u": uid, "n": n, "sk": key.name if key is not None else None}
         if moved.size > n * 0.75:
             msg["c"] = -1
@@ -171,6 +184,32 @@ class Live:
             msg["c"] = int(moved.size)
             binary = moved.astype(np.int32).tobytes() + co.reshape(-1, 3)[moved].tobytes()
         session.send_live(msg, binary)
+        session.last_change_t = now
+        return True
+
+    def _read_selected(self, me, uid, st, session, now):
+        """Gros maillage en mode Edition : relire tout le maillage (update_from_editmode)
+        coute ~45 ms pour 200 000 sommets, soit 5 images/s au mieux. Pendant un geste
+        qui ne bouge que la selection, on lit seulement ces sommets dans le BMesh
+        (~1 ms pour 1000). None : impossible (topologie changee), relecture complete."""
+        import bmesh
+        bm = bmesh.from_edit_mesh(me)
+        verts = bm.verts
+        n = len(verts)
+        if st.base is None or st.base.size != n * 3:
+            return None
+        verts.ensure_lookup_table()
+        sel = st.sel
+        co = np.array([verts[i].co[:] for i in sel.tolist()], np.float32).reshape(-1, 3)
+        base = st.base.reshape(-1, 3)
+        diff = np.any(co != base[sel], axis=1)
+        moved = sel[diff]
+        if moved.size == 0:
+            return False
+        new = co[diff]
+        base[moved] = new
+        session.send_live({"type": "live", "w": "m", "u": uid, "n": n, "sk": None, "c": int(moved.size)},
+                          moved.astype(np.int32).tobytes() + new.tobytes())
         session.last_change_t = now
         return True
 
@@ -235,7 +274,10 @@ class Live:
                 idx = np.frombuffer(binary, np.int32, count)
                 co = np.frombuffer(binary, np.float32, count * 3, offset=count * 4).reshape(-1, 3)
             self.rx_mesh.setdefault(uid, []).append((n, msg.get("sk"), idx, co))
-            self.rx_hold[uid] = now + RX_HOLD
+            # L'etat complet d'un gros maillage arrive plus tard (relecture espacee
+            # chez celui qui edite, envoi de plusieurs Mo) : sans attente plus longue,
+            # on le prenait pour une modification locale et on renvoyait tout le maillage.
+            self.rx_hold[uid] = now + RX_HOLD + min(3.5, n / 80000.0)
             self.tr.session.last_change_t = now
         elif msg.get("w") == "n":
             self.rx_hold[uid] = now + RX_HOLD
@@ -296,6 +338,18 @@ class Live:
             if block is not None and block == keys.reference_key:
                 targets.append(me.vertices)
             nv = len(targets[0])
+            group = [g for g in group if g[0] == nv]     # autre topologie : l'etat complet arrive
+            if not group:
+                continue
+            if all(g[2] is not None for g in group) and sum(len(g[2]) for g in group) <= SPARSE_MAX:
+                # Quelques sommets : les ecrire un par un (relire et reecrire tout un
+                # maillage de 200 000 sommets coutait ~50 ms a chaque image).
+                for _n, _name, idx, new in group:
+                    pairs = list(zip(idx.tolist(), new.tolist()))
+                    for target in targets:
+                        for i, c in pairs:
+                            target[i].co = c
+                continue
             co = np.empty(nv * 3, np.float32)
             targets[0].foreach_get("co", co)
             patched = False
@@ -314,3 +368,23 @@ class Live:
             keys.update_tag()
         me.update()
         compat.tag_redraw(("VIEW_3D",))
+
+
+def _selected_if_only(me, n, moved):
+    """Indices des sommets selectionnes si le mouvement se limite a eux (sinon None :
+    edition proportionnelle, miroir... on garde la relecture complete)."""
+    import bmesh
+    try:
+        ts = bpy.context.scene.tool_settings
+        if ts.use_proportional_edit or me.use_mirror_x or me.use_mirror_y or me.use_mirror_z:
+            return None
+    except AttributeError:
+        pass
+    bm = bmesh.from_edit_mesh(me)
+    if len(bm.verts) != n:
+        return None
+    sel = np.fromiter((v.select for v in bm.verts), bool, n)
+    count = int(sel.sum())
+    if count == 0 or count > SEL_MAX or not sel[moved].all():
+        return None
+    return np.flatnonzero(sel)

@@ -83,6 +83,9 @@ def _auth(password, nonce):
     return hmac.new(password.encode("utf-8"), nonce.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+POLL = 0.005     # releve des messages recus (le tic complet reste a 30-60 par seconde)
+
+
 def _timer():
     s = current
     if s is None:
@@ -124,6 +127,8 @@ class BaseSession:
         self.loading = False
         self.sync_frame = False
         self.last_change_t = 0.0
+        self.last_full = 0.0
+        self.next_full = 0.0
         self.local_backup_t = time.time()
         self.closed_reason = ""
         self.error = ""
@@ -179,6 +184,12 @@ class BaseSession:
     # ------------------------------------------------------------------
     def tick(self):
         now = time.time()
+        if self.active and now < self.next_full and not self._urgent(now):
+            # Rien recu, rien de modifie : on revient tres vite voir, sans rien
+            # faire d'autre (cout negligeable). Un message recu est ainsi traite
+            # en ~5 ms au lieu d'attendre le tic suivant (jusqu'a 33 ms).
+            return POLL
+        self.last_full = now
         try:
             tr = getattr(self, "tracker", None)
             if tr is not None and tr.smoother.items:
@@ -194,7 +205,16 @@ class BaseSession:
         # les autres), 30 Hz sinon.
         tr = getattr(self, "tracker", None)
         busy = (tr is not None and bool(tr.smoother.items)) or now - self.last_change_t < 0.6
-        return 0.016 if busy else 0.03
+        self.next_full = now + (0.016 if busy else 0.03)
+        return POLL
+
+    def _urgent(self, now):
+        """Un message attend, ou une modification locale est a envoyer (60 fois/s au plus)."""
+        if not self.inbox.empty():
+            return True
+        tr = getattr(self, "tracker", None)
+        return (tr is not None and now - self.last_full >= 0.016 and
+                bool(tr.dirty or tr.live.activity or tr.mode_activity))
 
     def _tick(self, now):
         raise NotImplementedError
@@ -548,7 +568,7 @@ class HostSession(BaseSession):
             nonce = os.urandom(12).hex()
             self.clients[cid] = {"user": None, "nonce": nonce, "ready": False}
             if conn:
-                conn.send({"type": "challenge", "nonce": nonce, "proto": net.PROTOCOL_VERSION,
+                conn.send({"type": "challenge", "nonce": nonce, "proto": net.PROTOCOL_VERSION, "probe": 1,
                            "name": self.session_name, "pw": bool(self.password)})
             return
         client = self.clients.get(cid)
@@ -1297,14 +1317,14 @@ class ClientSession(BaseSession):
         self.host_ver = ""
         self.snapshot_size = 0
 
-    def connect(self, address, port, password="", timeout=8.0, sock=None):
+    def connect(self, address, port, password="", timeout=8.0, sock=None, early=()):
         global current
         self.address = address
         self.port = int(port)
         self.password = password or ""
         self.session_dir = os.path.join(root_dir(), "joined", "%s_%s" % (_safe(address), _stamp()))
         os.makedirs(self.session_dir, exist_ok=True)
-        self.conn = net.connect(address, self.port, self.inbox, timeout=timeout, sock=sock)
+        self.conn = net.connect(address, self.port, self.inbox, timeout=timeout, sock=sock, early=early)
         self.state = "auth"
         current = self
         self._start_timer()
@@ -1525,6 +1545,8 @@ class ClientSession(BaseSession):
         elif t == "notice":
             self.toast(msg.get("text", ""), tuple(msg.get("c") or (1, 0.8, 0.3)))
         elif t == "pong":
+            if msg.get("probe"):
+                return
             self.rtt = int((time.time() - (msg.get("t") or time.time())) * 1000)
         elif t == "role":
             self.role = msg.get("role", "editor")
@@ -1901,7 +1923,7 @@ def open_socket(address, port, timeout=None):
                                     timeout=timeout or invite.connect_timeout(address))
 
 
-def join(address, port, password="", username=None, color=None, viewer=False, sock=None):
+def join(address, port, password="", username=None, color=None, viewer=False, sock=None, early=()):
     global current, last_reason
     last_reason = ""
     if sock is None:
@@ -1912,52 +1934,138 @@ def join(address, port, password="", username=None, color=None, viewer=False, so
     p = _prefs()
     s = ClientSession(username or p.username or "Joueur", color or tuple(p.color), viewer=viewer)
     try:
-        s.connect(address, port, password, sock=sock)
+        s.connect(address, port, password, sock=sock, early=early)
     except Exception:
         sock.close()
         raise
     return s
 
 
-def race(addresses, open_fn=None):
-    """Essaie toutes les adresses EN MEME TEMPS ; renvoie (adresse, port, socket)
-    de la premiere qui repond (les autres sont fermees), ou leve OSError avec le
-    detail de chaque essai. Avant : une par une, jusqu'a 15 s d'attente."""
+RACE_GRACE = 1.2      # attente d'un chemin plus rapide apres le premier qui repond
+DIRECT_BONUS = 0.015  # a 15 ms pres, on prefere une connexion directe a un relais
+
+
+def _is_direct(address):
+    return not webtunnel.is_web_address(address) and address != "bore.pub" and (
+        invite.is_private(address) or address.startswith(("100.", "127.")) or address == "localhost")
+
+
+def probe(sock, timeout=4.0):
+    """Mesure le vrai temps d'aller-retour jusqu'a l'hote par cette socket.
+
+    Renvoie (secondes, trames deja lues). Un hote 1.9+ repond au ping des son
+    thread reseau ; un hote plus ancien ne repond pas avant l'authentification :
+    on garde alors le temps d'arrivee de son premier message."""
+    import socket
+    sock.settimeout(timeout)
+    t0 = time.perf_counter()
+    try:
+        msg, binary = net.read_frame(sock)
+    except socket.timeout:
+        # Hote occupe (chargement, rendu...) : chemin utilisable, mais dernier choix.
+        sock.settimeout(None)
+        return timeout, []
+    rtt = time.perf_counter() - t0
+    early = [(msg, binary)]
+    if msg.get("type") == "challenge" and msg.get("probe"):
+        best = None
+        for _ in range(2):
+            t = time.perf_counter()
+            net.write_frame(sock, {"type": "ping", "t": 0, "probe": 1})
+            while True:
+                m, b = net.read_frame(sock)
+                if m.get("type") == "pong" and m.get("probe"):
+                    break
+                early.append((m, b))
+            r = time.perf_counter() - t
+            best = r if best is None else min(best, r)
+        rtt = best
+    sock.settimeout(None)
+    return rtt, early
+
+
+def race(addresses, open_fn=None, measure=None):
+    """Essaie toutes les adresses EN MEME TEMPS et garde la plus RAPIDE.
+
+    Chaque chemin qui repond est chronometre jusqu'a Blender chez l'hote (ping).
+    Apres le premier, on attend encore un peu les autres : le premier a repondre
+    est souvent le relais bore.pub (connexion vite ouverte, mais 3 a 6 fois plus
+    lent ensuite que la voie HTTPS ou le reseau local). Renvoie
+    (adresse, port, socket, trames deja lues) ; leve OSError avec le detail de
+    chaque essai si rien ne repond."""
     import threading
+    measure = open_fn is None if measure is None else measure
     open_fn = open_fn or open_socket
     results = queue.Queue()
     lock = threading.Lock()
-    won = []
+    done = []
+
+    def _close(sk):
+        try:
+            sk.close()
+        except OSError:
+            pass
 
     def attempt(i, address, port):
+        sk = None
         try:
             sk = open_fn(address, port)
+            rtt, early = probe(sk) if measure else (0.0, [])
         except Exception as exc:  # noqa: BLE001
-            results.put((i, address, port, None, exc))
+            if sk is not None:
+                _close(sk)
+            results.put((i, address, port, None, None, None, exc))
             return
         with lock:
-            if won:
-                try:
-                    sk.close()
-                except OSError:
-                    pass
+            if done:
+                _close(sk)
                 return
-            won.append(i)
-        results.put((i, address, port, sk, None))
+            results.put((i, address, port, sk, rtt, early, None))
 
     addresses = list(addresses)
     for i, (address, port) in enumerate(addresses):
         threading.Thread(target=attempt, args=(i, address, port), daemon=True,
                          name="mp-join-try").start()
     errors = {}
-    while len(errors) < len(addresses):
+    best = None
+    first_t = None
+    pending = len(addresses)
+    while pending:
+        wait = 90.0 if first_t is None else first_t + RACE_GRACE - time.time()
         try:
-            i, address, port, sk, exc = results.get(timeout=90)
+            item = results.get(timeout=max(0.0, wait))
         except queue.Empty:
-            raise OSError("aucune adresse ne repond (delai depasse)")
-        if sk is not None:
-            return address, port, sk
-        errors[i] = "%s (%s)" % (_shown(address, port), describe_error(exc, address))
+            if best is None:
+                raise OSError("aucune adresse ne repond (delai depasse)")
+            break
+        pending -= 1
+        i, address, port, sk, rtt, early, exc = item
+        if sk is None:
+            errors[i] = "%s (%s)" % (_shown(address, port), describe_error(exc, address))
+            continue
+        score = rtt - (DIRECT_BONUS if _is_direct(address) else 0.0)
+        if first_t is None:
+            first_t = time.time()
+        if best is None or score < best[0]:
+            if best is not None:
+                _close(best[3])
+            best = (score, address, port, sk, early, rtt)
+        else:
+            _close(sk)
+        if _is_direct(address) and rtt < 0.02:
+            break       # reseau local : on ne fera pas mieux
+    with lock:
+        done.append(True)
+    while True:
+        try:
+            item = results.get_nowait()
+        except queue.Empty:
+            break
+        if item[3] is not None:
+            _close(item[3])
+    if best is not None:
+        _score, address, port, sk, early, _rtt = best
+        return address, port, sk, early
     raise OSError("aucune adresse ne repond : " + " ; ".join(errors[i] for i in sorted(errors))
                   + _diagnose(addresses))
 
@@ -1979,8 +2087,9 @@ def _diagnose(addresses):
 
 def join_any(addresses, password="", username=None, color=None, viewer=False):
     """Connecte la premiere adresse qui repond ; renvoie la session."""
-    address, port, sk = race(addresses)
-    return join(address, port, password, username=username, color=color, viewer=viewer, sock=sk)
+    address, port, sk, early = race(addresses)
+    return join(address, port, password, username=username, color=color, viewer=viewer, sock=sk,
+                early=early)
 
 
 def describe_error(exc, address=""):

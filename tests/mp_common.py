@@ -32,7 +32,12 @@ def log(*a):
     print("[%s]" % ROLE, *a, flush=True)
 
 
+_NEXT_TICK = [0.0]
+
+
 def pump(seconds=0.05):
+    """Fait tourner la session comme dans Blender : le tic est rappele apres le
+    delai qu'il renvoie (minuteur bpy.app.timers), la scene est evaluee entre-temps."""
     end = time.time() + seconds
     while True:
         s = session.current
@@ -41,10 +46,12 @@ def pump(seconds=0.05):
                 bpy.context.view_layer.update()
             except Exception:
                 pass
-            s.tick()
+            if time.time() >= _NEXT_TICK[0]:
+                delay = s.tick()
+                _NEXT_TICK[0] = time.time() + (delay if delay else 0.1)
         if time.time() >= end:
             break
-        time.sleep(0.01)
+        time.sleep(0.003)
 
 
 def wait_for(cond, timeout=20.0, what=""):

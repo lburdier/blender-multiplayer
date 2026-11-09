@@ -78,7 +78,7 @@ try:
     T.pump(1.0)
     T.say("C3")
 
-    # Mode Edition : verrou + geometrie en direct
+    # Mode Edition (geometrie en direct) puis Sculpt (verrou)
     cone = bpy.data.objects["ClientCone"]
     for o in bpy.context.view_layer.objects:
         o.select_set(False)
@@ -89,6 +89,9 @@ try:
     for v in bm.verts:
         v.co.z += 2.0
     bmesh.update_edit_mesh(cone.data)
+    T.pump(1.2)
+    # Le mode Edition d'un maillage se partage (scenario E) ; le Sculpt verrouille.
+    bpy.ops.object.mode_set(mode="SCULPT")
     T.pump(1.2)
     T.say("C4_EDITING")
     T.barrier("S4")

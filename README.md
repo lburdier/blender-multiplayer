@@ -77,7 +77,8 @@ Restent **propres à chaque joueur** :
 
 - Chaque joueur apparaît comme une **caméra colorée** à son point de vue, avec son nom, son mode et une ligne de visée.
 - Ses objets **sélectionnés** sont encadrés à sa couleur, son **curseur 3D** est affiché.
-- Les objets en cours d'édition par quelqu'un (mode Édition, Sculpt, Pose, Peinture) sont **verrouillés** : épais contour + « Verrouillé : Nom ». Personne d'autre ne peut les modifier tant qu'ils sont en cours d'édition.
+- **Édition à plusieurs du même maillage** (1.8.0) : plusieurs joueurs peuvent être en mode Édition sur le même objet en même temps. Les sommets que l'autre déplace bougent en direct dans votre propre mode Édition ; ses extrusions, subdivisions, suppressions, UV… arrivent sans vous faire quitter le mode Édition, et votre sélection est conservée. Si vous déplacez chacun des sommets différents, rien n'est perdu ; si vous touchez le même sommet, la dernière modification l'emporte. Une modification de topologie reçue pendant que vous faites glisser quelque chose (G, R, S, couteau…) est appliquée juste après votre geste. Contour fin + « En édition : Nom » sur l'objet. Tous les joueurs doivent avoir la version 1.8.0 ou plus.
+- Les objets en Sculpt, Pose ou Peinture (et les objets non-maillage en mode Édition : courbes, armatures…) restent **verrouillés** : épais contour + « Verrouillé : Nom ». Personne d'autre ne peut les modifier tant qu'ils sont en cours d'édition.
 - **Suivre** (icône œil) : votre vue suit celle d'un joueur ; bougez la vue pour arrêter. **Aller à** (icône caméra) : se placer une fois à son point de vue.
 - **Signaler le curseur** : un repère animé apparaît chez tout le monde. **Chat** intégré, messages affichés dans le viewport.
 
@@ -86,7 +87,7 @@ Restent **propres à chaque joueur** :
 | Action | Effet |
 |---|---|
 | **Ctrl+Z / Ctrl+Maj+Z** (mode Objet) | Annule / rétablit **votre** dernière action pour tout le monde, sans toucher au travail des autres. Si quelqu'un a modifié la même propriété entre-temps, elle est conservée et vous êtes prévenu. |
-| Ctrl+Z en mode Édition | Annulation native de Blender (l'objet est verrouillé pour vous) ; le résultat est diffusé. |
+| Ctrl+Z en mode Édition | Annulation native de Blender ; le résultat est diffusé. Si quelqu'un édite le même maillage, elle peut aussi défaire ce qu'il a fait depuis votre dernière action : préférez Ctrl+Z après être sorti du mode Édition. |
 | ✕ sur une entrée | Annule cette action précise, même ancienne, même faite par un autre joueur. |
 | ⟲ sur une entrée | **Revenir à ce point** : toute la scène reprend l'état qu'elle avait juste après cette action. Ce retour s'annule lui-même par Ctrl+Z. |
 | Glisser (G/R/S) | Une seule entrée d'historique, pas des centaines. |
@@ -141,13 +142,17 @@ MP_SCENE="<scene.blend>" python tests/run_integration.py "<hôte>" "<client>" 57
 MP_SCENE="<JC_Commander_Rig.blend>" MP_K_ADDON="<dossier>" python tests/run_integration.py "<hôte>" "<client>" 57150 K
 # Shading, UV, couleurs et index de matériau d'un maillage vus par l'autre joueur pendant le mode Édition
 python tests/run_integration.py "<hôte>" "<client>" 57160 L
+# Édition à deux du même maillage en mode Édition (sommets en direct, topologie, groupes de sommets)
+python tests/run_integration.py "<hôte>" "<client>" 57180 E
+# ... et dans une vraie fenêtre : sommets reçus pendant un vrai G, topologie reçue mise en attente jusqu'à la fin du G
+"<blender>" --factory-startup --enable-event-simulate --python tests/gui_coedit.py -- "<dossier du dépôt>" "<dossier de sortie>"
 # Latence de bout en bout (mode Édition, cles de forme, topologie, matériau, modificateur)
 # MP_M_DRIVER=client : c'est l'invité qui fait le geste
 python tests/run_integration.py "<hôte>" "<client>" 57170 M
 # Compatibilité avec une autre version de l'addon : MP_HOST_ROOT / MP_CLIENT_ROOT = dossier contenant blender_multiplayer
 ```
 
-Le scénario 1 couvre la création et la suppression à distance, les matériaux, le Ctrl+Z partagé, les modifications simultanées, le verrou en mode Édition avec la géométrie en direct, les modificateurs, les collections, les parents, le retour à un point et son annulation, les sauvegardes. Le scénario 2 couvre les lumières, les caméras, l'animation, Geometry Nodes, les images, les courbes, l'armature (pose et os), le texte, Maj+D, les conflits de noms simultanés et l'absence d'opération quand on change de frame. Le scénario 3 couvre les textures (fichiers externes, tuiles UDIM, fichier modifié sur le disque, peinture dans les deux sens), tous les paramètres et nodes des lumières, le partage des réglages de rendu (le périphérique et la vue 3D restant propres à chacun), le glissement des objets sans écho et l'expiration de l'historique avec archive. Le scénario K fait piloter le Jeep par le vrai code de l'addon du véhicule (conduite au clavier, feux, driver ajouté, clés posées) chez l'hôte ou chez l'invité, et vérifie que l'autre joueur voit la même pose, les mêmes roues et le même braquage, sans rien renvoyer.
+Le scénario 1 couvre la création et la suppression à distance, les matériaux, le Ctrl+Z partagé, les modifications simultanées, la géométrie en direct en mode Édition, le verrou en Sculpt, les modificateurs, les collections, les parents, le retour à un point et son annulation, les sauvegardes. Le scénario 2 couvre les lumières, les caméras, l'animation, Geometry Nodes, les images, les courbes, l'armature (pose et os), le texte, Maj+D, les conflits de noms simultanés et l'absence d'opération quand on change de frame. Le scénario 3 couvre les textures (fichiers externes, tuiles UDIM, fichier modifié sur le disque, peinture dans les deux sens), tous les paramètres et nodes des lumières, le partage des réglages de rendu (le périphérique et la vue 3D restant propres à chacun), le glissement des objets sans écho et l'expiration de l'historique avec archive. Le scénario K fait piloter le Jeep par le vrai code de l'addon du véhicule (conduite au clavier, feux, driver ajouté, clés posées) chez l'hôte ou chez l'invité, et vérifie que l'autre joueur voit la même pose, les mêmes roues et le même braquage, sans rien renvoyer. Le scénario E met l'hôte et l'invité en mode Édition sur le même maillage : glissements simultanés vus en direct sans s'écraser, subdivision par l'un et suppression par l'autre reçues sans quitter le mode Édition, direct toujours actif après, maillages identiques et aucun renvoi à la sortie, puis la même chose sur un maillage avec groupe de sommets.
 
 ## Publier une nouvelle version
 

@@ -275,7 +275,14 @@ class Live:
 
     def _apply_mesh(self, uid, items):
         me = self.tr.resolve(uid)
-        if not isinstance(me, bpy.types.Mesh) or me.is_editmode:
+        if not isinstance(me, bpy.types.Mesh):
+            return
+        if me.is_editmode:
+            # Un autre edite le meme maillage que nous : ses sommets arrivent
+            # directement dans notre BMesh d'edition.
+            from . import coedit
+            coedit.apply_live(me, items, self, uid)
+            compat.tag_redraw(("VIEW_3D",))
             return
         by_key = {}
         for item in items:

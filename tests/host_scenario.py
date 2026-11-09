@@ -69,11 +69,11 @@ try:
     T.barrier("C3")
     T.pump(1.0)
 
-    # 5. Verrou : le client est en mode Edition sur le cone
+    # 5. Verrou : le client edite le cone (mode Edition puis Sculpt)
     T.barrier("C4_EDITING")
     cone = bpy.data.objects["ClientCone"]
     T.wait_for(lambda: s.locks.get(T.mp.ids.get_uid(cone)) is not None, 10, "verrou")
-    T.check("verrou pose par le mode Edition distant", s.locks.get(T.mp.ids.get_uid(cone)) is not None)
+    T.check("verrou pose par le mode Sculpt distant", s.locks.get(T.mp.ids.get_uid(cone)) is not None)
     T.wait_for(lambda: min(v.co.z for v in cone.data.vertices) > 0.5, 10, "geometrie en direct")
     T.check("edition de maillage en direct (mode Edition)", min(v.co.z for v in cone.data.vertices) > 0.5,
             min(v.co.z for v in cone.data.vertices))

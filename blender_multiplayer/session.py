@@ -112,6 +112,7 @@ class BaseSession:
         self.follow = None
         self.follow_state = {}
         self.my_locks = set()
+        self.my_coedit = set()      # objets en mode Edition partage (sans verrou)
         self.last_presence = None
         self.last_presence_t = 0.0
         self.session_name = ""
@@ -208,7 +209,7 @@ class BaseSession:
 
     def _reconcile(self):
         self.reconcile_pending = False
-        keep = set(self.my_locks)
+        keep = set(self.my_locks) | set(self.my_coedit)
         n = self.tracker.restore_known(keep=keep)
         for uid in keep:
             self.tracker.dirty.setdefault(uid, set()).update(("x", "g"))
@@ -235,6 +236,7 @@ class BaseSession:
             return
         pres["rtt"] = getattr(self, "rtt", 0)
         self.my_locks = set(pres.get("edit", []))
+        self.my_coedit = set(pres.get("co", []))
         if pres != self.last_presence or now - self.last_presence_t > 2.0:
             self.last_presence = pres
             self.last_presence_t = now
@@ -250,7 +252,7 @@ class BaseSession:
                 self.follow_state = {}
 
     def _enforce_locks(self):
-        for uid in self.my_locks:
+        for uid in self.my_locks | self.my_coedit:
             owner = self.locks.get(uid)
             if owner is not None and owner != self.me:
                 self.toast("%s modifie deja cet objet : retour en mode Objet." %
@@ -264,6 +266,7 @@ class BaseSession:
         except Exception as exc:  # noqa: BLE001
             self.log("sortie de mode: %s" % exc)
         self.my_locks = set()
+        self.my_coedit = set()
         self.tracker.mode_scan_t = 0.0
 
     def start_follow(self, uid):

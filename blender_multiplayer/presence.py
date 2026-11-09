@@ -51,14 +51,19 @@ def capture(session):
         d["mode"] = act.mode if act else "OBJECT"
         sel = []
         edit = []
+        co = []
         for o in session.tracker.objects_in_mode(time.time()):
             u = ids.get_uid(o)
             if u:
-                edit.append(u)
+                # Mode Edition d'un maillage : partage (pas de verrou), les autres
+                # peuvent editer le meme objet en meme temps. Autres modes : verrou.
+                shared = o.mode == "EDIT" and isinstance(o.data, bpy.types.Mesh)
+                dest = co if shared else edit
+                dest.append(u)
                 if o.data is not None:
                     du = ids.get_uid(o.data)
                     if du:
-                        edit.append(du)
+                        dest.append(du)
         try:
             for o in vl.objects:
                 if o.select_get(view_layer=vl):
@@ -71,6 +76,7 @@ def capture(session):
             pass
         d["sel"] = sel
         d["edit"] = edit
+        d["co"] = co
     return d
 
 
@@ -271,6 +277,17 @@ def draw_view():
             user = s.users.get(owner)
             if user:
                 _draw_lines(coords, _color(user, 0.5), 4.0)
+        # objets edites a plusieurs (mode Edition partage) : cadre plus fin
+        for uid, user in s.users.items():
+            if uid == s.me:
+                continue
+            coords = []
+            for ou in (user.get("presence") or {}).get("co", [])[:16]:
+                obj = s.tracker.index.get(ou)
+                if isinstance(obj, bpy.types.Object):
+                    coords += _box_lines(obj)
+            if coords:
+                _draw_lines(coords, _color(user, 0.45), 2.5)
         for ping in list(s.pings):
             age = now - ping["t"]
             if age > 6:
@@ -338,6 +355,23 @@ def draw_pixel():
                     blf.color(font, *_color(user))
                     blf.position(font, xy.x - 20, xy.y + 14, 0)
                     blf.draw(font, "Verrouille : %s" % user.get("name", "?"))
+        editors = {}
+        for uid, user in s.users.items():
+            if uid == s.me:
+                continue
+            for ou in (user.get("presence") or {}).get("co", [])[:16]:
+                obj = s.tracker.index.get(ou)
+                if isinstance(obj, bpy.types.Object):
+                    editors.setdefault(ou, (obj, []))[1].append(user)
+        for obj, users in editors.values():
+            try:
+                xy = location_3d_to_region_2d(region, rv3d, obj.matrix_world.translation)
+            except Exception:
+                xy = None
+            if xy is not None:
+                blf.color(font, *_color(users[0]))
+                blf.position(font, xy.x - 20, xy.y + 14, 0)
+                blf.draw(font, "En edition : %s" % ", ".join(u.get("name", "?") for u in users))
         for ping in list(s.pings):
             if now - ping["t"] > 6:
                 continue

@@ -1048,6 +1048,10 @@ def apply_mesh_field(me, k, v, ctx):
         data = ctx.store.get(v["$p"])
         if data is None:
             raise MissingPayload(v["$p"])
+        if me.is_editmode:
+            from . import coedit
+            coedit.merge_bytes(me, data, ctx)
+            return
         if me.shape_keys is not None:
             for obj in ctx.users_of(me):
                 try:
@@ -1589,7 +1593,8 @@ def apply_blob(attr, uid, fields, existing, ctx):
     data = ctx.store.get(bref["$p"]) if bref else None
     if data is None:
         raise MissingPayload(bref["$p"] if bref else "?")
-    if existing is not None and getattr(existing, "is_editmode", False):
+    editing = existing is not None and getattr(existing, "is_editmode", False)
+    if editing and attr != "meshes":
         raise Locked(existing.name)
     # Chemin d'origine du fichier externe : garde si le contenu recu est identique
     # (evite de remplacer les chemins de l'hote par des copies).
@@ -1637,6 +1642,26 @@ def apply_blob(attr, uid, fields, existing, ctx):
                 ids.remove_id(a, nid)
             else:
                 ctx.adopt(nu, nid, a)
+    if editing:
+        # Maillage en mode Edition chez nous : on fusionne la geometrie recue dans
+        # le BMesh d'edition au lieu de remplacer le data-block.
+        from . import coedit
+        try:
+            coedit.merge(existing, target, ctx)
+        finally:
+            ids.remove_id(attr, target)
+            for lib in list(bpy.data.libraries):
+                if lib.as_pointer() not in libs_before:
+                    try:
+                        bpy.data.libraries.remove(lib)
+                    except Exception:
+                        pass
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        ctx.register(uid, existing, attr)
+        return existing
     if existing is not None and existing != target:
         try:
             existing.user_remap(target)

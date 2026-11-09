@@ -15,8 +15,8 @@ blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
-network = "Synchronisation de la scene entre les joueurs (TCP, relais bore.pub, tunnel HTTPS Cloudflare)"
-files = "Autosauvegardes, sauvegardes, historique de session et programme cloudflared (hote en ligne)"
+network = "Synchronisation entre joueurs (TCP, bore.pub, tunnel HTTPS)"
+files = "Sauvegardes, historique et programme cloudflared (hote)"
 
 [build]
 paths_exclude_pattern = ["__pycache__/", "/.git/", "*.zip"]

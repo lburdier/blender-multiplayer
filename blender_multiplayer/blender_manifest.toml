@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "blender_multiplayer"
-version = "1.6.0"
+version = "1.6.1"
 name = "Blender Multiplayer"
 tagline = "Edition collaborative en temps reel de la meme scene a plusieurs"
 maintainer = "Maxence Marrot"

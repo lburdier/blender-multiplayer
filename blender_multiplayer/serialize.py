@@ -791,6 +791,24 @@ def _attr_name(obj, attr):
 
 
 def geometry_bytes(me):
+    """Maillage -> octets, avec tous ses attributs (y compris en mode Edition).
+
+    En mode Edition, me.attributes decrit le BMesh : ses tableaux sont vides, et
+    sharp_face, sharp_edge ou material_index n'y existent pas. Sans eux, l'autre
+    joueur verrait un maillage tout lisse, sans UV ni couleurs. obj.to_mesh() donne
+    une copie hors de bpy.data, sans BMesh, de l'etat ecrit par update_from_editmode.
+    """
+    if me.is_editmode:
+        owner = next((o for o in bpy.data.objects if o.data == me and o.mode == "EDIT"), None)
+        if owner is not None:
+            try:
+                return _geometry_bytes(owner.to_mesh())
+            finally:
+                owner.to_mesh_clear()
+    return _geometry_bytes(me)
+
+
+def _geometry_bytes(me):
     nv, ne, nl, npoly = len(me.vertices), len(me.edges), len(me.loops), len(me.polygons)
     co = np.empty(nv * 3, np.float32)
     me.vertices.foreach_get("co", co)

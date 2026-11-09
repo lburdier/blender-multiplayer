@@ -134,6 +134,8 @@ MP_SCENE="<scene.blend>" python tests/run_integration.py "<hôte>" "<client>" 57
 # Modifications faites par un autre addon : le code de conduite de l'addon du véhicule pilote le rig
 # (MP_K_ADDON = dossier contenant jc_commander_rig, MP_K_DRIVER=client : c'est l'invité qui conduit)
 MP_SCENE="<JC_Commander_Rig.blend>" MP_K_ADDON="<dossier>" python tests/run_integration.py "<hôte>" "<client>" 57150 K
+# Shading, UV, couleurs et index de matériau d'un maillage vus par l'autre joueur pendant le mode Édition
+python tests/run_integration.py "<hôte>" "<client>" 57160 L
 # Compatibilité avec une autre version de l'addon : MP_HOST_ROOT / MP_CLIENT_ROOT = dossier contenant blender_multiplayer
 ```
 
